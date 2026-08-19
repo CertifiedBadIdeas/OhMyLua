@@ -1,7 +1,8 @@
 use omlua_ir::{
     AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FieldId, FunctionId, LocalId,
-    LocalKind, OmBlock, OmField, OmFunction, OmLocal, OmProgram, OmStruct, OmType, Operand,
-    ProjectElem, Rvalue, Statement, SwitchValue, Terminator, TypeId, UnwindAction,
+    LocalKind, OmBlock, OmEnum, OmField, OmFunction, OmLocal, OmProgram, OmStruct, OmType,
+    OmVariant, Operand, ProjectElem, Rvalue, Statement, SwitchValue, Terminator, TypeId,
+    UnwindAction, VariantId,
 };
 use omlua_lua_backend::{LuaBackendProfile, LuaDialect, lower_program};
 use omlua_lua_ir::{
@@ -145,7 +146,7 @@ fn lowers_structs_and_shared_references_to_packed_tables() {
         lower_program(&recursive, &LuaBackendProfile::lua54())
             .unwrap_err()
             .to_string(),
-        "error[OMLUA0002]: structure definitions contain a by-value cycle through @0"
+        "error[OMLUA0002]: type definitions contain a by-value cycle through @0"
     );
 }
 
@@ -508,5 +509,468 @@ fn lir_local(index: u32, kind: LirValueKind, parameter: bool) -> LirLocal {
         id: LirLocalId::new(index),
         kind,
         parameter,
+    }
+}
+
+#[test]
+fn lowers_enums_and_match_data_to_packed_tables() {
+    let vec2 = TypeId::new(0);
+    let command = TypeId::new(1);
+    let program = OmProgram {
+        entry: FunctionId::new(0),
+        structs: vec![OmStruct {
+            id: vec2,
+            name: "Vec2".to_owned(),
+            fields: vec![
+                OmField {
+                    id: FieldId::new(0),
+                    name: "x".to_owned(),
+                    ty: OmType::I32,
+                },
+                OmField {
+                    id: FieldId::new(1),
+                    name: "y".to_owned(),
+                    ty: OmType::I32,
+                },
+            ],
+        }],
+        enums: vec![OmEnum {
+            id: command,
+            name: "Command".to_owned(),
+            variants: vec![
+                OmVariant {
+                    id: VariantId::new(0),
+                    name: "Stop".to_owned(),
+                    fields: vec![],
+                },
+                OmVariant {
+                    id: VariantId::new(1),
+                    name: "GoTo".to_owned(),
+                    fields: vec![
+                        OmField {
+                            id: FieldId::new(0),
+                            name: "x".to_owned(),
+                            ty: OmType::I32,
+                        },
+                        OmField {
+                            id: FieldId::new(1),
+                            name: "y".to_owned(),
+                            ty: OmType::I32,
+                        },
+                    ],
+                },
+                OmVariant {
+                    id: VariantId::new(2),
+                    name: "Move".to_owned(),
+                    fields: vec![OmField {
+                        id: FieldId::new(0),
+                        name: "0".to_owned(),
+                        ty: OmType::Struct(vec2),
+                    }],
+                },
+            ],
+        }],
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "main".to_owned(),
+            return_type: OmType::Unit,
+            parameters: vec![],
+            locals: vec![
+                om_local(0, OmType::Unit, LocalKind::Return),
+                om_local(1, OmType::Enum(command), LocalKind::Temporary),
+                om_local(2, OmType::I32, LocalKind::Discriminant),
+                om_local(3, OmType::I32, LocalKind::Temporary),
+                om_local(4, OmType::SharedRef(vec2), LocalKind::Temporary),
+                om_local(5, OmType::I32, LocalKind::Temporary),
+            ],
+            blocks: vec![OmBlock {
+                id: BlockId::new(0),
+                statements: vec![
+                    Statement::Assign {
+                        destination: LocalId::new(1),
+                        value: Rvalue::Variant {
+                            ty: command,
+                            variant: VariantId::new(1),
+                            fields: vec![
+                                Operand::Constant(Constant::I32(20)),
+                                Operand::Constant(Constant::I32(22)),
+                            ],
+                        },
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(2),
+                        value: Rvalue::Discriminant {
+                            source: Operand::Copy(LocalId::new(1)),
+                        },
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(3),
+                        value: Rvalue::Use(Operand::Project {
+                            base: LocalId::new(1),
+                            path: vec![
+                                ProjectElem::Downcast(VariantId::new(1)),
+                                ProjectElem::Field(FieldId::new(1)),
+                            ],
+                            moved: true,
+                        }),
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(4),
+                        value: Rvalue::SharedBorrow {
+                            source: Operand::Project {
+                                base: LocalId::new(1),
+                                path: vec![
+                                    ProjectElem::Downcast(VariantId::new(2)),
+                                    ProjectElem::Field(FieldId::new(0)),
+                                ],
+                                moved: false,
+                            },
+                        },
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(5),
+                        value: Rvalue::Use(Operand::Project {
+                            base: LocalId::new(4),
+                            path: vec![
+                                ProjectElem::Deref,
+                                ProjectElem::Field(FieldId::new(0)),
+                            ],
+                            moved: false,
+                        }),
+                    },
+                ],
+                terminator: Terminator::Return,
+            }],
+        }],
+    };
+
+    let lir = lower_program(&program, &LuaBackendProfile::lua54()).unwrap();
+    let function = &lir.functions[0];
+    let shapes = vec![
+        vec![],
+        vec![LirValueKind::Integer, LirValueKind::Integer],
+        vec![LirValueKind::Table(vec![
+            LirValueKind::Integer,
+            LirValueKind::Integer,
+        ])],
+    ];
+    assert_eq!(function.locals[0].kind, LirValueKind::Enum(shapes.clone()));
+    assert_eq!(
+        function.blocks[0].statements,
+        vec![
+            LirStatement::Assign {
+                destination: LirLocalId::new(1),
+                value: LirExpression::Enum {
+                    shapes: shapes.clone(),
+                    tag: 1,
+                    fields: vec![
+                        LirExpression::Value(LirValue::Integer(20)),
+                        LirExpression::Value(LirValue::Integer(22)),
+                    ],
+                },
+            },
+            LirStatement::Assign {
+                destination: LirLocalId::new(2),
+                value: LirExpression::EnumTag {
+                    value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(
+                        1
+                    )))),
+                },
+            },
+            LirStatement::Assign {
+                destination: LirLocalId::new(3),
+                value: LirExpression::EnumField {
+                    value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(
+                        1
+                    )))),
+                    variant: 1,
+                    field: 1,
+                    result: LirValueKind::Integer,
+                },
+            },
+            LirStatement::Assign {
+                destination: LirLocalId::new(4),
+                value: LirExpression::EnumField {
+                    value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(
+                        1
+                    )))),
+                    variant: 2,
+                    field: 0,
+                    result: LirValueKind::Table(vec![
+                        LirValueKind::Integer,
+                        LirValueKind::Integer,
+                    ]),
+                },
+            },
+            LirStatement::Assign {
+                destination: LirLocalId::new(5),
+                value: LirExpression::TableGet {
+                    table: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(4)))),
+                    index: 1,
+                    result: LirValueKind::Integer,
+                },
+            },
+        ]
+    );
+    assert_eq!(
+        lower_program(
+            &{
+                let mut missing = program.clone();
+                missing.functions[0].locals[1].ty = OmType::Enum(TypeId::new(9));
+                missing
+            },
+            &LuaBackendProfile::lua54(),
+        )
+        .unwrap_err()
+        .to_string(),
+        "error[OMLUA0002]: local type references missing enum @9\n  in function `main`"
+    );
+}
+
+#[test]
+fn rejects_malformed_enum_programs() {
+    let mut unknown_variant = enum_base();
+    match &mut unknown_variant.functions[0].blocks[0].statements[0] {
+        Statement::Assign {
+            value: Rvalue::Variant { variant, .. },
+            ..
+        } => *variant = VariantId::new(9),
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        lower_program(&unknown_variant, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        concat!(
+            "error[OMLUA0002]: variant v9 does not exist in enum @1\n",
+            "  in function `main`, basic block bb0",
+        )
+    );
+
+    let mut wrong_arity = enum_base();
+    match &mut wrong_arity.functions[0].blocks[0].statements[0] {
+        Statement::Assign {
+            value: Rvalue::Variant { fields, .. },
+            ..
+        } => fields.truncate(1),
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        lower_program(&wrong_arity, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        concat!(
+            "error[OMLUA0002]: variant v1 of enum @1 expects 2 fields, got 1\n",
+            "  in function `main`, basic block bb0",
+        )
+    );
+
+    let mut wrong_kind = enum_base();
+    match &mut wrong_kind.functions[0].blocks[0].statements[0] {
+        Statement::Assign {
+            value: Rvalue::Variant { fields, .. },
+            ..
+        } => fields[0] = Operand::Constant(Constant::Bool(true)),
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        lower_program(&wrong_kind, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        concat!(
+            "error[OMLUA0002]: field .0 has the wrong type\n",
+            "  in function `main`, basic block bb0",
+        )
+    );
+
+    let mut collision = enum_base();
+    collision.structs.push(OmStruct {
+        id: TypeId::new(1),
+        name: "Fake".to_owned(),
+        fields: vec![],
+    });
+    assert_eq!(
+        lower_program(&collision, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0002]: type @1 is both a structure and an enum"
+    );
+
+    let mut non_contiguous = enum_base();
+    non_contiguous.enums[0].variants[1].id = VariantId::new(2);
+    assert_eq!(
+        lower_program(&non_contiguous, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0002]: enum @1 has non-contiguous variant identifier v2"
+    );
+
+    let mut trailing_downcast = enum_base();
+    match &mut trailing_downcast.functions[0].blocks[0].statements[1] {
+        Statement::Assign {
+            value: Rvalue::Use(Operand::Project { path, .. }),
+            ..
+        } => *path = vec![ProjectElem::Downcast(VariantId::new(1))],
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        lower_program(&trailing_downcast, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        concat!(
+            "error[OMLUA0002]: projection ends with a downcast without a field read\n",
+            "  in function `main`",
+        )
+    );
+
+    let mut downcast_on_struct = enum_base();
+    downcast_on_struct.functions[0].locals[1].ty = OmType::Struct(TypeId::new(0));
+    downcast_on_struct.structs.push(OmStruct {
+        id: TypeId::new(0),
+        name: "Point".to_owned(),
+        fields: vec![OmField {
+            id: FieldId::new(0),
+            name: "x".to_owned(),
+            ty: OmType::I32,
+        }],
+    });
+    match &mut downcast_on_struct.functions[0].blocks[0].statements[0] {
+        Statement::Assign { value, .. } => {
+            *value = Rvalue::Struct {
+                ty: TypeId::new(0),
+                fields: vec![Operand::Constant(Constant::I32(20))],
+            };
+        }
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        lower_program(&downcast_on_struct, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        concat!(
+            "error[OMLUA0002]: downcast crosses a non-enum value\n",
+            "  in function `main`",
+        )
+    );
+
+    let mut discriminant_of_struct = enum_base();
+    match &mut discriminant_of_struct.functions[0].blocks[0].statements[1] {
+        Statement::Assign { value, .. } => {
+            *value = Rvalue::Discriminant {
+                source: Operand::Copy(LocalId::new(1)),
+            };
+        }
+        _ => unreachable!(),
+    }
+    discriminant_of_struct.functions[0].locals[1].ty = OmType::Struct(TypeId::new(0));
+    discriminant_of_struct.structs.push(OmStruct {
+        id: TypeId::new(0),
+        name: "Point".to_owned(),
+        fields: vec![OmField {
+            id: FieldId::new(0),
+            name: "x".to_owned(),
+            ty: OmType::I32,
+        }],
+    });
+    match &mut discriminant_of_struct.functions[0].blocks[0].statements[0] {
+        Statement::Assign { value, .. } => {
+            *value = Rvalue::Struct {
+                ty: TypeId::new(0),
+                fields: vec![Operand::Constant(Constant::I32(20))],
+            };
+        }
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        lower_program(&discriminant_of_struct, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        concat!(
+            "error[OMLUA0002]: discriminant source is not an enum value\n",
+            "  in function `main`, basic block bb0",
+        )
+    );
+
+    let mut cycle = enum_base();
+    cycle.enums[0].variants[1].fields[0].ty = OmType::Enum(TypeId::new(1));
+    assert_eq!(
+        lower_program(&cycle, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0002]: type definitions contain a by-value cycle through @1"
+    );
+}
+
+fn enum_base() -> OmProgram {
+    let command = TypeId::new(1);
+    OmProgram {
+        entry: FunctionId::new(0),
+        structs: vec![],
+        enums: vec![OmEnum {
+            id: command,
+            name: "Command".to_owned(),
+            variants: vec![
+                OmVariant {
+                    id: VariantId::new(0),
+                    name: "Stop".to_owned(),
+                    fields: vec![],
+                },
+                OmVariant {
+                    id: VariantId::new(1),
+                    name: "GoTo".to_owned(),
+                    fields: vec![
+                        OmField {
+                            id: FieldId::new(0),
+                            name: "x".to_owned(),
+                            ty: OmType::I32,
+                        },
+                        OmField {
+                            id: FieldId::new(1),
+                            name: "y".to_owned(),
+                            ty: OmType::I32,
+                        },
+                    ],
+                },
+            ],
+        }],
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "main".to_owned(),
+            return_type: OmType::Unit,
+            parameters: vec![],
+            locals: vec![
+                om_local(0, OmType::Unit, LocalKind::Return),
+                om_local(1, OmType::Enum(command), LocalKind::Temporary),
+                om_local(2, OmType::I32, LocalKind::Temporary),
+            ],
+            blocks: vec![OmBlock {
+                id: BlockId::new(0),
+                statements: vec![
+                    Statement::Assign {
+                        destination: LocalId::new(1),
+                        value: Rvalue::Variant {
+                            ty: command,
+                            variant: VariantId::new(1),
+                            fields: vec![
+                                Operand::Constant(Constant::I32(20)),
+                                Operand::Constant(Constant::I32(22)),
+                            ],
+                        },
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(2),
+                        value: Rvalue::Use(Operand::Project {
+                            base: LocalId::new(1),
+                            path: vec![
+                                ProjectElem::Downcast(VariantId::new(1)),
+                                ProjectElem::Field(FieldId::new(0)),
+                            ],
+                            moved: false,
+                        }),
+                    },
+                ],
+                terminator: Terminator::Return,
+            }],
+        }],
     }
 }
