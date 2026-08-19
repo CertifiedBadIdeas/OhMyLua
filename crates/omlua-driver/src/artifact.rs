@@ -1,4 +1,5 @@
 use std::fs::{self, OpenOptions};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,9 +15,15 @@ pub struct LuaArtifact {
 impl LuaArtifact {
     pub fn prepare(project_dir: &Path) -> io::Result<Self> {
         let output_directory = project_dir.join("target").join("omlua");
-        fs::create_dir_all(&output_directory)
-            .map_err(|error| path_error("create Lua output directory", &output_directory, error))?;
-        let lock_path = output_directory.join(".build.lock");
+        let project_identity = fs::canonicalize(project_dir)
+            .map_err(|error| path_error("resolve project directory", project_dir, error))?;
+        let lock_directory = std::env::temp_dir().join("omlua-build-locks");
+        fs::create_dir_all(&lock_directory).map_err(|error| {
+            path_error("create Lua build lock directory", &lock_directory, error)
+        })?;
+        let mut hasher = DefaultHasher::new();
+        project_identity.hash(&mut hasher);
+        let lock_path = lock_directory.join(format!("{:016x}.lock", hasher.finish()));
         let lock_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -172,7 +179,8 @@ mod tests {
         reset(&directory);
         fs::create_dir(directory.join("target")).unwrap();
         fs::write(directory.join("target/omlua"), "not a directory").unwrap();
-        let error = LuaArtifact::prepare(&directory).err().unwrap();
+        let artifact = LuaArtifact::prepare(&directory).unwrap();
+        let error = artifact.commit("return 42\n").unwrap_err();
         assert!(error.to_string().contains("create Lua output directory"));
         assert!(!directory.join("target/omlua/program.lua").exists());
         fs::remove_dir_all(directory).unwrap();

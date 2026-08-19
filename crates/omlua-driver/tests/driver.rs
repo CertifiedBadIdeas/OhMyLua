@@ -221,6 +221,12 @@ fn builds_the_exact_reviewed_lua54_artifact() {
         fs::read(artifact(&project)).unwrap(),
         fs::read(lua54_expected("scalars.lua")).unwrap()
     );
+    let mut output_entries: Vec<_> = fs::read_dir(project.join("target/omlua"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    output_entries.sort();
+    assert_eq!(output_entries, ["program.lua"]);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(PathBuf::from(stdout.trim()), artifact(&project));
     fs::remove_dir_all(project).unwrap();
