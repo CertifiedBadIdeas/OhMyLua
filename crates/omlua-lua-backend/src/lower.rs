@@ -238,7 +238,8 @@ impl<'a> FunctionLowerer<'a> {
                 let definition = self.definitions.enums.get(ty).ok_or_else(|| {
                     self.block_error(block, format!("enum type @{ty} does not exist"))
                 })?;
-                let variant_definition = self.enum_variant_definition(definition, block, *variant)?;
+                let variant_definition =
+                    self.enum_variant_definition(definition, block, *variant)?;
                 if fields.len() != variant_definition.fields.len() {
                     return Err(self.block_error(
                         block,
@@ -269,9 +270,7 @@ impl<'a> FunctionLowerer<'a> {
             }
             Rvalue::Discriminant { source } => {
                 if !matches!(self.operand_type(source)?, OmType::Enum(_)) {
-                    return Err(
-                        self.block_error(block, "discriminant source is not an enum value")
-                    );
+                    return Err(self.block_error(block, "discriminant source is not an enum value"));
                 }
                 Ok(LirExpression::EnumTag {
                     value: Box::new(self.lower_operand(block, source)?),
@@ -308,75 +307,63 @@ impl<'a> FunctionLowerer<'a> {
                         }
                         ProjectElem::Downcast(variant) => {
                             let OmType::Enum(id) = ty else {
-                                return Err(self.block_error(
-                                    block,
-                                    "downcast crosses a non-enum value",
-                                ));
+                                return Err(
+                                    self.block_error(block, "downcast crosses a non-enum value")
+                                );
                             };
                             self.validate_variant(block, id, *variant)?;
                             downcast = Some(*variant);
                         }
-                        ProjectElem::Field(field_id) => {
-                            match (ty, downcast.take()) {
-                                (OmType::Struct(struct_id), None) => {
-                                    let field = self.field(struct_id, field_id.index(), block)?;
-                                    let result =
-                                        lower_type(field.ty, self.definitions)?.ok_or_else(|| {
-                                            self.block_error(
-                                                block,
-                                                "unit structure fields are not supported",
-                                            )
-                                        })?;
-                                    value = LirExpression::TableGet {
-                                        table: Box::new(value),
-                                        index: field_id.index().checked_add(1).ok_or_else(
-                                            || {
-                                                self.block_error(
-                                                    block,
-                                                    "Lua table field index overflow",
-                                                )
-                                            },
-                                        )?,
-                                        result,
-                                    };
-                                    ty = field.ty;
-                                }
-                                (OmType::Enum(enum_id), Some(variant)) => {
-                                    let field = self.enum_field(
-                                        block,
-                                        enum_id,
-                                        variant,
-                                        field_id.index(),
-                                    )?;
-                                    let result =
-                                        lower_type(field.ty, self.definitions)?.ok_or_else(|| {
-                                            self.block_error(
-                                                block,
-                                                "unit enum fields are not supported",
-                                            )
-                                        })?;
-                                    value = LirExpression::EnumField {
-                                        value: Box::new(value),
-                                        variant: variant.index(),
-                                        field: field_id.index(),
-                                        result,
-                                    };
-                                    ty = field.ty;
-                                }
-                                (OmType::Enum(_), None) => {
-                                    return Err(self.block_error(
-                                        block,
-                                        "enum field access requires a variant downcast",
-                                    ));
-                                }
-                                _ => {
-                                    return Err(self.block_error(
-                                        block,
-                                        "field projection starts from a non-struct value",
-                                    ));
-                                }
+                        ProjectElem::Field(field_id) => match (ty, downcast.take()) {
+                            (OmType::Struct(struct_id), None) => {
+                                let field = self.field(struct_id, field_id.index(), block)?;
+                                let result =
+                                    lower_type(field.ty, self.definitions)?.ok_or_else(|| {
+                                        self.block_error(
+                                            block,
+                                            "unit structure fields are not supported",
+                                        )
+                                    })?;
+                                value = LirExpression::TableGet {
+                                    table: Box::new(value),
+                                    index: field_id.index().checked_add(1).ok_or_else(|| {
+                                        self.block_error(block, "Lua table field index overflow")
+                                    })?,
+                                    result,
+                                };
+                                ty = field.ty;
                             }
-                        }
+                            (OmType::Enum(enum_id), Some(variant)) => {
+                                let field =
+                                    self.enum_field(block, enum_id, variant, field_id.index())?;
+                                let result =
+                                    lower_type(field.ty, self.definitions)?.ok_or_else(|| {
+                                        self.block_error(
+                                            block,
+                                            "unit enum fields are not supported",
+                                        )
+                                    })?;
+                                value = LirExpression::EnumField {
+                                    value: Box::new(value),
+                                    variant: variant.index(),
+                                    field: field_id.index(),
+                                    result,
+                                };
+                                ty = field.ty;
+                            }
+                            (OmType::Enum(_), None) => {
+                                return Err(self.block_error(
+                                    block,
+                                    "enum field access requires a variant downcast",
+                                ));
+                            }
+                            _ => {
+                                return Err(self.block_error(
+                                    block,
+                                    "field projection starts from a non-struct value",
+                                ));
+                            }
+                        },
                     }
                 }
                 if downcast.is_some() {
@@ -598,9 +585,14 @@ impl<'a> FunctionLowerer<'a> {
                                 (OmType::Struct(struct_id), None) => {
                                     self.field_for_function(struct_id, field_id.index())?.ty
                                 }
-                                (OmType::Enum(enum_id), Some(variant)) => self
-                                    .enum_field_for_function(enum_id, variant, field_id.index())?
-                                    .ty,
+                                (OmType::Enum(enum_id), Some(variant)) => {
+                                    self.enum_field_for_function(
+                                        enum_id,
+                                        variant,
+                                        field_id.index(),
+                                    )?
+                                    .ty
+                                }
                                 (OmType::Enum(_), None) => {
                                     return Err(LowerError::function(
                                         &self.function.name,
@@ -688,7 +680,8 @@ impl<'a> FunctionLowerer<'a> {
                 let definition = self.definitions.enums.get(ty).ok_or_else(|| {
                     self.block_error(block, format!("enum type @{ty} does not exist"))
                 })?;
-                let variant_definition = self.enum_variant_definition(definition, block, *variant)?;
+                let variant_definition =
+                    self.enum_variant_definition(definition, block, *variant)?;
                 if fields.len() != variant_definition.fields.len() {
                     return Err(self.block_error(
                         block,
@@ -776,7 +769,10 @@ impl<'a> FunctionLowerer<'a> {
             .ok_or_else(|| {
                 self.block_error(
                     block,
-                    format!("variant v{variant} does not exist in enum @{}", definition.id),
+                    format!(
+                        "variant v{variant} does not exist in enum @{}",
+                        definition.id
+                    ),
                 )
             })
     }
@@ -847,12 +843,14 @@ fn lower_type(
         OmType::Bool => Ok(Some(LirValueKind::Bool)),
         OmType::I32 => Ok(Some(LirValueKind::Integer)),
         OmType::Enum(id) => {
-            let definition = definitions.enums.get(&id).ok_or_else(|| {
-                LowerError::program(format!("enum type @{id} does not exist"))
-            })?;
-            Ok(Some(LirValueKind::Enum(
-                enum_shapes(definition, definitions)?,
-            )))
+            let definition = definitions
+                .enums
+                .get(&id)
+                .ok_or_else(|| LowerError::program(format!("enum type @{id} does not exist")))?;
+            Ok(Some(LirValueKind::Enum(enum_shapes(
+                definition,
+                definitions,
+            )?)))
         }
         OmType::Struct(id) | OmType::SharedRef(id) => {
             let definition = definitions.structs.get(&id).ok_or_else(|| {
@@ -910,7 +908,11 @@ fn index_definitions(program: &OmProgram) -> Result<Definitions<'_>, LowerError>
         enums: BTreeMap::new(),
     };
     for definition in &program.structs {
-        if definitions.structs.insert(definition.id, definition).is_some() {
+        if definitions
+            .structs
+            .insert(definition.id, definition)
+            .is_some()
+        {
             return Err(LowerError::program(format!(
                 "structure type @{} is defined twice",
                 definition.id
@@ -932,7 +934,11 @@ fn index_definitions(program: &OmProgram) -> Result<Definitions<'_>, LowerError>
         }
     }
     for definition in &program.enums {
-        if definitions.enums.insert(definition.id, definition).is_some() {
+        if definitions
+            .enums
+            .insert(definition.id, definition)
+            .is_some()
+        {
             return Err(LowerError::program(format!(
                 "enum type @{} is defined twice",
                 definition.id
@@ -1064,13 +1070,13 @@ fn validate_nominal_type(
     definitions: &Definitions<'_>,
     function: &str,
 ) -> Result<(), LowerError> {
-    if let OmType::Struct(id) | OmType::SharedRef(id) = ty {
-        if !definitions.structs.contains_key(&id) {
-            return Err(LowerError::function(
-                function,
-                format!("local type references missing structure @{id}"),
-            ));
-        }
+    if let OmType::Struct(id) | OmType::SharedRef(id) = ty
+        && !definitions.structs.contains_key(&id)
+    {
+        return Err(LowerError::function(
+            function,
+            format!("local type references missing structure @{id}"),
+        ));
     }
     if let OmType::Enum(id) = ty
         && !definitions.enums.contains_key(&id)

@@ -631,10 +631,7 @@ fn lowers_enums_and_match_data_to_packed_tables() {
                         destination: LocalId::new(5),
                         value: Rvalue::Use(Operand::Project {
                             base: LocalId::new(4),
-                            path: vec![
-                                ProjectElem::Deref,
-                                ProjectElem::Field(FieldId::new(0)),
-                            ],
+                            path: vec![ProjectElem::Deref, ProjectElem::Field(FieldId::new(0))],
                             moved: false,
                         }),
                     },
@@ -672,17 +669,13 @@ fn lowers_enums_and_match_data_to_packed_tables() {
             LirStatement::Assign {
                 destination: LirLocalId::new(2),
                 value: LirExpression::EnumTag {
-                    value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(
-                        1
-                    )))),
+                    value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(1)))),
                 },
             },
             LirStatement::Assign {
                 destination: LirLocalId::new(3),
                 value: LirExpression::EnumField {
-                    value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(
-                        1
-                    )))),
+                    value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(1)))),
                     variant: 1,
                     field: 1,
                     result: LirValueKind::Integer,
@@ -691,15 +684,12 @@ fn lowers_enums_and_match_data_to_packed_tables() {
             LirStatement::Assign {
                 destination: LirLocalId::new(4),
                 value: LirExpression::EnumField {
-                    value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(
-                        1
-                    )))),
+                    value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(1)))),
                     variant: 2,
                     field: 0,
-                    result: LirValueKind::Table(vec![
-                        LirValueKind::Integer,
-                        LirValueKind::Integer,
-                    ]),
+                    result: LirValueKind::Table(
+                        vec![LirValueKind::Integer, LirValueKind::Integer,]
+                    ),
                 },
             },
             LirStatement::Assign {

@@ -244,7 +244,8 @@ fn emits_and_validates_enums() {
     );
 
     let mut missing_variant = enum_program(1, 0);
-    let LirStatement::Assign { value, .. } = &mut missing_variant.functions[0].blocks[0].statements[2];
+    let LirStatement::Assign { value, .. } =
+        &mut missing_variant.functions[0].blocks[0].statements[2];
     let LirExpression::EnumField { variant, .. } = value else {
         unreachable!()
     };

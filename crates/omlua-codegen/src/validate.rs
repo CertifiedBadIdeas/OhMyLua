@@ -419,7 +419,11 @@ fn expression_kind(
             }
             Ok(result.clone())
         }
-        LirExpression::Enum { shapes, tag, fields } => {
+        LirExpression::Enum {
+            shapes,
+            tag,
+            fields,
+        } => {
             let Some(shape) = shapes.get(*tag as usize) else {
                 return Err(error(format!(
                     "{context} constructs an enum with tag {tag} outside its shape table"
@@ -439,7 +443,9 @@ fn expression_kind(
         LirExpression::EnumTag { value } => {
             let actual = expression_kind(value, locals, helpers, used_helpers, context)?;
             if !matches!(actual, LirValueKind::Enum(_)) {
-                return Err(error(format!("{context} reads the tag of a non-enum value")));
+                return Err(error(format!(
+                    "{context} reads the tag of a non-enum value"
+                )));
             }
             Ok(LirValueKind::Integer)
         }

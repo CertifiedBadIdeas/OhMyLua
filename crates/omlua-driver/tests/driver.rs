@@ -449,6 +449,15 @@ fn rejects_enum_references_and_ref_mut_bindings_without_partial_output() {
             .unwrap()
             .contains("mutable reference `&mut i32` is not supported")
     );
+
+    let generic = compile("unsupported_generic_enum.rs");
+    assert!(!generic.status.success());
+    assert!(generic.stdout.is_empty());
+    assert!(
+        String::from_utf8(generic.stderr)
+            .unwrap()
+            .contains("generic enum `Wrapper` is not supported")
+    );
 }
 
 fn expected_omir() -> &'static str {

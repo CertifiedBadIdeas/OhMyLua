@@ -9,8 +9,12 @@ use crate::LowerError;
 
 pub(super) struct TypeRegistry {
     ids: HashMap<DefId, TypeId>,
-    definitions: Vec<Option<OmStruct>>,
-    enum_definitions: Vec<Option<OmEnum>>,
+    definitions: Vec<Option<Nominal>>,
+}
+
+enum Nominal {
+    Struct(OmStruct),
+    Enum(OmEnum),
 }
 
 impl TypeRegistry {
@@ -18,7 +22,6 @@ impl TypeRegistry {
         Self {
             ids: HashMap::new(),
             definitions: Vec::new(),
-            enum_definitions: Vec::new(),
         }
     }
 
@@ -63,40 +66,30 @@ impl TypeRegistry {
     }
 
     pub(super) fn definition(&self, id: TypeId) -> Option<&OmStruct> {
-        self.definitions
-            .get(id.index() as usize)
-            .and_then(Option::as_ref)
+        match self.definitions.get(id.index() as usize) {
+            Some(Some(Nominal::Struct(definition))) => Some(definition),
+            _ => None,
+        }
     }
 
     pub(super) fn enum_definition(&self, id: TypeId) -> Option<&OmEnum> {
-        self.enum_definitions
-            .get(id.index() as usize)
-            .and_then(Option::as_ref)
+        match self.definitions.get(id.index() as usize) {
+            Some(Some(Nominal::Enum(definition))) => Some(definition),
+            _ => None,
+        }
     }
 
     pub(super) fn finish(self) -> Result<(Vec<OmStruct>, Vec<OmEnum>), LowerError> {
-        let structs = self
-            .definitions
-            .into_iter()
-            .enumerate()
-            .map(|(index, definition)| {
-                definition.ok_or_else(|| {
-                    LowerError::program(format!(
-                        "structure type @{index} was not completely defined"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let enums = self
-            .enum_definitions
-            .into_iter()
-            .enumerate()
-            .map(|(index, definition)| {
-                definition.ok_or_else(|| {
-                    LowerError::program(format!("enum type @{index} was not completely defined"))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut structs = Vec::new();
+        let mut enums = Vec::new();
+        for (index, definition) in self.definitions.into_iter().enumerate() {
+            match definition.ok_or_else(|| {
+                LowerError::program(format!("type @{index} was not completely defined"))
+            })? {
+                Nominal::Struct(definition) => structs.push(definition),
+                Nominal::Enum(definition) => enums.push(definition),
+            }
+        }
         Ok((structs, enums))
     }
 
@@ -177,11 +170,11 @@ impl TypeRegistry {
             });
         }
 
-        self.definitions[id.index() as usize] = Some(OmStruct {
+        self.definitions[id.index() as usize] = Some(Nominal::Struct(OmStruct {
             id,
             name: tcx.def_path_str(def_id),
             fields,
-        });
+        }));
         Ok(id)
     }
 
@@ -215,24 +208,18 @@ impl TypeRegistry {
             )));
         }
 
-        let index = u32::try_from(self.enum_definitions.len())
+        let index = u32::try_from(self.definitions.len())
             .map_err(|_| LowerError::program("enum count exceeds OMIR limits"))?;
         let id = TypeId::new(index);
         self.ids.insert(def_id, id);
-        self.enum_definitions.push(None);
+        self.definitions.push(None);
 
         let mut variants = Vec::with_capacity(definition.variants().len());
         for (variant_index, variant) in definition.variants().iter_enumerated() {
-            let variant_id = VariantId::new(
-                u32::try_from(variant_index)
-                    .map_err(|_| LowerError::program("variant count exceeds OMIR limits"))?,
-            );
+            let variant_id = VariantId::new(variant_index.as_u32());
             let mut fields = Vec::with_capacity(variant.fields.len());
-            for (field_index, field) in variant.fields.iter().enumerate() {
-                let field_id = FieldId::new(
-                    u32::try_from(field_index)
-                        .map_err(|_| LowerError::program("field count exceeds OMIR limits"))?,
-                );
+            for (field_index, field) in variant.fields.iter_enumerated() {
+                let field_id = FieldId::new(field_index.as_u32());
                 let field_ty = field.ty(tcx, arguments).skip_normalization();
                 if matches!(field_ty.kind(), ty::Ref(..)) {
                     return Err(LowerError::program(format!(
@@ -264,11 +251,11 @@ impl TypeRegistry {
             });
         }
 
-        self.enum_definitions[id.index() as usize] = Some(OmEnum {
+        self.definitions[id.index() as usize] = Some(Nominal::Enum(OmEnum {
             id,
             name: tcx.def_path_str(def_id),
             variants,
-        });
+        }));
         Ok(id)
     }
 }

@@ -159,7 +159,11 @@ fn format_rvalue(value: &Rvalue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        Rvalue::Variant { ty, variant, fields } => format!(
+        Rvalue::Variant {
+            ty,
+            variant,
+            fields,
+        } => format!(
             "variant @{ty}#{variant} {{ {} }}",
             fields
                 .iter()

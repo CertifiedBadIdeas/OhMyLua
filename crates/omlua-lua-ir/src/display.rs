@@ -90,9 +90,7 @@ impl fmt::Display for LirExpression {
                 })?;
                 formatter.write_str(")")
             }
-            Self::Table {
-                fields,
-            } => {
+            Self::Table { fields } => {
                 formatter.write_str("table {")?;
                 write_joined(formatter, fields, |formatter, field| field.fmt(formatter))?;
                 formatter.write_str("}")
@@ -113,7 +111,10 @@ impl fmt::Display for LirExpression {
                 variant,
                 field,
                 result,
-            } => write!(formatter, "enum_field {value}#{variant}.{field} -> {result}"),
+            } => write!(
+                formatter,
+                "enum_field {value}#{variant}.{field} -> {result}"
+            ),
         }
     }
 }

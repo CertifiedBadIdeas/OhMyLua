@@ -256,7 +256,9 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                     })
                 } else {
                     if variant.as_usize() != 0 {
-                        return Err(self.block_error(block, "non-structure aggregate is not supported"));
+                        return Err(
+                            self.block_error(block, "non-structure aggregate is not supported")
+                        );
                     }
                     Ok(Rvalue::Struct { ty, fields })
                 }
@@ -389,7 +391,9 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                             ));
                         }
                         _ => {
-                            return Err(self.block_error(block, "field access on a non-structure value"));
+                            return Err(
+                                self.block_error(block, "field access on a non-structure value")
+                            );
                         }
                     };
                     path.push(ProjectElem::Field(FieldId::new(field.as_u32())));
@@ -694,10 +698,18 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         type_id: TypeId,
         variant: VariantId,
     ) -> Result<(), LowerError> {
-        let definition = self.registry.types.enum_definition(type_id).ok_or_else(|| {
-            self.block_error(block, format!("enum type @{type_id} is incomplete"))
-        })?;
-        if definition.variants.get(variant.index() as usize).is_some_and(|v| v.id == variant) {
+        let definition = self
+            .registry
+            .types
+            .enum_definition(type_id)
+            .ok_or_else(|| {
+                self.block_error(block, format!("enum type @{type_id} is incomplete"))
+            })?;
+        if definition
+            .variants
+            .get(variant.index() as usize)
+            .is_some_and(|v| v.id == variant)
+        {
             Ok(())
         } else {
             Err(self.block_error(
@@ -714,9 +726,13 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         variant: VariantId,
         field_index: usize,
     ) -> Result<&omlua_ir::OmField, LowerError> {
-        let definition = self.registry.types.enum_definition(type_id).ok_or_else(|| {
-            self.block_error(block, format!("enum type @{type_id} is incomplete"))
-        })?;
+        let definition = self
+            .registry
+            .types
+            .enum_definition(type_id)
+            .ok_or_else(|| {
+                self.block_error(block, format!("enum type @{type_id} is incomplete"))
+            })?;
         definition
             .variants
             .get(variant.index() as usize)
