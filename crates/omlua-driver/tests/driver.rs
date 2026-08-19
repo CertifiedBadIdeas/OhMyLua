@@ -643,6 +643,64 @@ fn builds_and_executes_the_exact_enum_match_artifact() {
     fs::remove_dir_all(project).unwrap();
 }
 
+#[test]
+fn builds_and_executes_the_exact_option_result_artifact() {
+    let project = project_directory("option-result");
+    let output = build(&project, &lua54_fixture("option_result.rs"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read(artifact(&project)).unwrap(),
+        fs::read(lua54_expected("option_result.lua")).unwrap()
+    );
+
+    let execution = Command::new("lua")
+        .arg(artifact(&project))
+        .output()
+        .expect("Lua 5.4.8 is required on PATH");
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(execution.stdout.is_empty());
+    assert!(execution.stderr.is_empty());
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
+fn builds_and_executes_the_exact_question_mark_artifact() {
+    let project = project_directory("question-mark");
+    let output = build(&project, &lua54_fixture("question_mark.rs"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read(artifact(&project)).unwrap(),
+        fs::read(lua54_expected("question_mark.lua")).unwrap()
+    );
+
+    let execution = Command::new("lua")
+        .arg(artifact(&project))
+        .output()
+        .expect("Lua 5.4.8 is required on PATH");
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(execution.stdout.is_empty());
+    assert!(execution.stderr.is_empty());
+    fs::remove_dir_all(project).unwrap();
+}
+
 fn expected_struct_omir() -> &'static str {
     concat!(
         "program entry @0\n",
