@@ -18,6 +18,8 @@ use rustc_span::def_id::DefId;
 use crate::LowerError;
 
 use super::program::FunctionRegistry;
+use super::try_helper::TryCall;
+use super::types::core_try_enum_name;
 
 pub(super) fn lower_function(
     tcx: TyCtxt<'_>,
@@ -600,12 +602,35 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                 else {
                     return Err(self.block_error(block, "indirect calls are not supported"));
                 };
+                let destination_ty = destination.ty(&self.body.local_decls, self.tcx).ty;
+                let target = target
+                    .ok_or_else(|| self.block_error(block, "diverging calls are not supported"))?;
+                if let Some(try_call) =
+                    self.classify_try_call(block, def_id, generic_args, destination_ty)?
+                {
+                    let arguments = match try_call {
+                        TryCall::OptionFromResidual { .. } => Vec::new(),
+                        _ => args
+                            .iter()
+                            .map(|argument| self.lower_operand(block, &argument.node))
+                            .collect::<Result<_, _>>()?,
+                    };
+                    let callee = self
+                        .registry
+                        .register_synthetic(self.tcx, try_call.name(), &try_call)
+                        .map_err(|error| self.block_error(block, error.detail()))?;
+                    return Ok(Terminator::Call {
+                        callee,
+                        arguments,
+                        destination: self.lower_place(block, destination)?,
+                        target: block_id(target, &self.name)?,
+                        unwind: lower_unwind(*unwind, &self.name)?,
+                    });
+                }
                 let callee = self
                     .registry
                     .register(self.tcx, def_id, generic_args)
                     .map_err(|error| self.block_error(block, error.detail()))?;
-                let target = target
-                    .ok_or_else(|| self.block_error(block, "diverging calls are not supported"))?;
                 Ok(Terminator::Call {
                     callee,
                     arguments: args
@@ -672,6 +697,74 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
 
     fn block_error(&self, block: BasicBlock, detail: impl Into<String>) -> LowerError {
         LowerError::block(&self.name, block.index() as u32, detail)
+    }
+
+    fn classify_try_call(
+        &self,
+        block: BasicBlock,
+        def_id: DefId,
+        generic_args: ty::GenericArgsRef<'tcx>,
+        flow: Ty<'tcx>,
+    ) -> Result<Option<TryCall<'tcx>>, LowerError> {
+        match self.tcx.def_path_str(def_id).as_str() {
+            "std::ops::Try::branch" => self
+                .try_branch_call(block, generic_args.type_at(0), flow)
+                .map(Some),
+            "std::ops::FromResidual::from_residual" => self
+                .try_from_residual_call(block, generic_args.type_at(0), generic_args.type_at(1))
+                .map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    fn try_branch_call(
+        &self,
+        block: BasicBlock,
+        self_ty: Ty<'tcx>,
+        flow: Ty<'tcx>,
+    ) -> Result<TryCall<'tcx>, LowerError> {
+        let ty::Adt(definition, _) = self_ty.kind() else {
+            return Err(self.unsupported_try(block, self_ty));
+        };
+        match core_try_enum_name(self.tcx, definition.did()) {
+            Some("Option") => Ok(TryCall::OptionBranch {
+                option: self_ty,
+                flow,
+            }),
+            Some("Result") => Ok(TryCall::ResultBranch {
+                result: self_ty,
+                flow,
+            }),
+            _ => Err(self.unsupported_try(block, self_ty)),
+        }
+    }
+
+    fn try_from_residual_call(
+        &self,
+        block: BasicBlock,
+        self_ty: Ty<'tcx>,
+        residual: Ty<'tcx>,
+    ) -> Result<TryCall<'tcx>, LowerError> {
+        let ty::Adt(definition, _) = self_ty.kind() else {
+            return Err(self.unsupported_try(block, self_ty));
+        };
+        match core_try_enum_name(self.tcx, definition.did()) {
+            Some("Option") => Ok(TryCall::OptionFromResidual { option: self_ty }),
+            Some("Result") => Ok(TryCall::ResultFromResidual {
+                result: self_ty,
+                residual,
+            }),
+            _ => Err(self.unsupported_try(block, self_ty)),
+        }
+    }
+
+    fn unsupported_try(&self, block: BasicBlock, self_ty: Ty<'tcx>) -> LowerError {
+        self.block_error(
+            block,
+            format!(
+                "the `?` operator is not supported for `{self_ty}`; only `Option` and `Result` are supported"
+            ),
+        )
     }
 
     fn struct_field(

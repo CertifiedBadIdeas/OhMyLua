@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use omlua_ir::{FunctionId, OmProgram};
+use omlua_ir::{FunctionId, OmFunction, OmProgram};
 use rustc_hir::def::DefKind;
 use rustc_middle::ty::{GenericArgsRef, TyCtxt};
 use rustc_span::def_id::DefId;
@@ -8,6 +8,7 @@ use rustc_span::def_id::DefId;
 use crate::LowerError;
 
 use super::body::lower_function;
+use super::try_helper::{synthesize_try_helper, TryCall};
 use super::types::TypeRegistry;
 
 pub(crate) fn lower_program(tcx: TyCtxt<'_>) -> Result<OmProgram, LowerError> {
@@ -17,13 +18,18 @@ pub(crate) fn lower_program(tcx: TyCtxt<'_>) -> Result<OmProgram, LowerError> {
 
     let mut registry = FunctionRegistry::new();
     let entry = registry.register(tcx, entry_def, GenericArgsRef::default())?;
-    let mut functions = Vec::new();
 
     while let Some(def_id) = registry.pending.pop_front() {
         let id = registry.ids[&def_id];
-        functions.push(lower_function(tcx, def_id, id, &mut registry)?);
+        let function = lower_function(tcx, def_id, id, &mut registry)?;
+        registry.slots[id.index() as usize] = Some(function);
     }
 
+    let functions = registry
+        .slots
+        .into_iter()
+        .map(|slot| slot.ok_or_else(|| LowerError::program("function was not fully lowered")))
+        .collect::<Result<Vec<_>, _>>()?;
     let (structs, enums) = registry.types.finish()?;
     Ok(OmProgram {
         entry,
@@ -35,7 +41,9 @@ pub(crate) fn lower_program(tcx: TyCtxt<'_>) -> Result<OmProgram, LowerError> {
 
 pub(super) struct FunctionRegistry {
     ids: HashMap<DefId, FunctionId>,
+    synthetic_ids: HashMap<String, FunctionId>,
     pending: VecDeque<DefId>,
+    slots: Vec<Option<OmFunction>>,
     pub(super) types: TypeRegistry,
 }
 
@@ -43,7 +51,9 @@ impl FunctionRegistry {
     fn new() -> Self {
         Self {
             ids: HashMap::new(),
+            synthetic_ids: HashMap::new(),
             pending: VecDeque::new(),
+            slots: Vec::new(),
             types: TypeRegistry::new(),
         }
     }
@@ -88,11 +98,30 @@ impl FunctionRegistry {
             return Ok(*id);
         }
 
-        let index = u32::try_from(self.ids.len())
+        let index = u32::try_from(self.slots.len())
             .map_err(|_| LowerError::program("function count exceeds OMIR limits"))?;
         let id = FunctionId::new(index);
         self.ids.insert(def_id, id);
+        self.slots.push(None);
         self.pending.push_back(def_id);
+        Ok(id)
+    }
+
+    pub(super) fn register_synthetic<'tcx>(
+        &mut self,
+        tcx: TyCtxt<'tcx>,
+        name: String,
+        call: &TryCall<'tcx>,
+    ) -> Result<FunctionId, LowerError> {
+        if let Some(id) = self.synthetic_ids.get(&name) {
+            return Ok(*id);
+        }
+        let index = u32::try_from(self.slots.len())
+            .map_err(|_| LowerError::program("function count exceeds OMIR limits"))?;
+        let id = FunctionId::new(index);
+        let function = synthesize_try_helper(tcx, id, &name, call, &mut self.types)?;
+        self.synthetic_ids.insert(name, id);
+        self.slots.push(Some(function));
         Ok(id)
     }
 }

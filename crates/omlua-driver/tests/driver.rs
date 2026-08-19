@@ -457,6 +457,47 @@ fn lowers_monomorphized_std_option_and_result_enums() {
 }
 
 #[test]
+fn lowers_question_mark_operator_to_synthetic_try_helpers() {
+    let output = compile("question_mark.rs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+
+    let omir = String::from_utf8(output.stdout).unwrap();
+    assert!(omir.contains("enum @0 Result<i32, MyErr> {"));
+    assert!(omir.contains("enum @2 Option<i32> {"));
+    assert!(omir.contains("enum @3 ControlFlow<Result<Infallible, MyErr>, i32> {"));
+    assert!(omir.contains("enum @4 Result<Infallible, MyErr> {"));
+    assert!(omir.contains("    .0 0: enum @5\n"));
+    assert!(omir.contains("enum @5 Infallible {\n}"));
+    assert!(omir.contains("enum @6 ControlFlow<Option<Infallible>, i32> {"));
+    assert!(omir.contains("enum @7 Option<Infallible> {"));
+    assert!(omir.contains("fn @4 __omlua_result_branch<i32, MyErr>(%1) -> enum @3 {"));
+    assert!(omir.contains("fn @5 __omlua_result_from_residual<i32, MyErr>(%1) -> enum @0 {"));
+    assert!(omir.contains("fn @7 __omlua_option_branch<i32>(%1) -> enum @6 {"));
+    assert!(omir.contains("fn @8 __omlua_option_from_residual<i32>() -> enum @2 {"));
+    assert!(omir.contains("discriminant copy %1"));
+    assert!(omir.contains("switch move %2 [0: bb2, 1: bb1, otherwise: bb3]"));
+    assert!(omir.contains("switch move %2 [0: bb1, 1: bb2, otherwise: bb3]"));
+    assert!(omir.contains("%3 = variant @6#0 { copy %1#1.0 }"));
+    assert!(omir.contains("%4 = variant @7#0 {  }"));
+    assert!(omir.contains("%5 = variant @6#1 { move %4 }"));
+    assert!(omir.contains("%3 = variant @3#0 { copy %1#0.0 }"));
+    assert!(omir.contains("%4 = variant @4#1 { copy %1#1.0 }"));
+    assert!(omir.contains("%5 = variant @3#1 { move %4 }"));
+    assert!(omir.contains("%0 = variant @2#0 {  }"));
+    assert!(omir.contains("%0 = variant @0#1 { move %1#1.0 }"));
+    assert!(omir.contains("call @4(move %2)"));
+    assert!(omir.contains("call @4(move %7)"));
+    assert!(omir.contains("call @5(copy %4)"));
+    assert!(omir.contains("call @7(move %2)"));
+    assert!(omir.contains("call @8()"));
+}
+
+#[test]
 fn rejects_enum_references_and_ref_mut_bindings_without_partial_output() {
     let enum_ref = compile("unsupported_enum_ref.rs");
     assert!(!enum_ref.status.success());

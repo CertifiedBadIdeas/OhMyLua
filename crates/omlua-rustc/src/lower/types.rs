@@ -273,7 +273,7 @@ impl TypeRegistry {
     }
 }
 
-fn core_try_enum_name(tcx: TyCtxt<'_>, def_id: DefId) -> Option<&'static str> {
+pub(super) fn core_try_enum_name(tcx: TyCtxt<'_>, def_id: DefId) -> Option<&'static str> {
     match tcx.def_path_str(def_id).as_str() {
         "std::option::Option" => Some("Option"),
         "std::result::Result" => Some("Result"),
@@ -283,20 +283,23 @@ fn core_try_enum_name(tcx: TyCtxt<'_>, def_id: DefId) -> Option<&'static str> {
     }
 }
 
+pub(super) fn normalize_core_enum_path(name: &str) -> String {
+    name.replace("std::result::Result", "Result")
+        .replace("std::option::Option", "Option")
+        .replace("std::ops::ControlFlow", "ControlFlow")
+        .replace("std::convert::Infallible", "Infallible")
+}
+
 fn core_enum_name(base: &'static str, arguments: ty::GenericArgsRef<'_>) -> String {
     if arguments.is_empty() {
         return base.to_owned();
     }
-    format!(
+    normalize_core_enum_path(&format!(
         "{base}<{}>",
         arguments
             .types()
             .map(|ty| ty.to_string())
             .collect::<Vec<_>>()
             .join(", ")
-    )
-    .replace("std::result::Result", "Result")
-    .replace("std::option::Option", "Option")
-    .replace("std::ops::ControlFlow", "ControlFlow")
-    .replace("std::convert::Infallible", "Infallible")
+    ))
 }
