@@ -1,14 +1,18 @@
 use std::fmt::{self, Write};
 
 use crate::{
-    AssertKind, BinaryOp, CheckedBinaryOp, Constant, LocalKind, OmFunction, OmProgram, OmStruct,
-    OmType, Operand, Rvalue, Statement, Terminator, UnaryOp, UnwindAction,
+    AssertKind, BinaryOp, CheckedBinaryOp, Constant, LocalKind, OmEnum, OmFunction, OmProgram,
+    OmStruct, OmType, Operand, ProjectElem, Rvalue, Statement, Terminator, UnaryOp, UnwindAction,
 };
 
 impl fmt::Display for OmProgram {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(formatter, "program entry @{}", self.entry)?;
         for definition in &self.structs {
+            writeln!(formatter)?;
+            write!(formatter, "{definition}")?;
+        }
+        for definition in &self.enums {
             writeln!(formatter)?;
             write!(formatter, "{definition}")?;
         }
@@ -31,6 +35,30 @@ impl fmt::Display for OmStruct {
                 field.name,
                 type_name(field.ty)
             )?;
+        }
+        writeln!(formatter, "}}")
+    }
+}
+
+impl fmt::Display for OmEnum {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(formatter, "enum @{} {} {{", self.id, self.name)?;
+        for variant in &self.variants {
+            if variant.fields.is_empty() {
+                writeln!(formatter, "  v{} {}", variant.id, variant.name)?;
+            } else {
+                writeln!(formatter, "  v{} {} {{", variant.id, variant.name)?;
+                for field in &variant.fields {
+                    writeln!(
+                        formatter,
+                        "    .{} {}: {}",
+                        field.id,
+                        field.name,
+                        type_name(field.ty)
+                    )?;
+                }
+                writeln!(formatter, "  }}")?;
+            }
         }
         writeln!(formatter, "}}")
     }
@@ -75,6 +103,7 @@ fn type_name(ty: OmType) -> String {
         OmType::Bool => "bool".to_owned(),
         OmType::I32 => "i32".to_owned(),
         OmType::Struct(id) => format!("struct @{id}"),
+        OmType::Enum(id) => format!("enum @{id}"),
         OmType::SharedRef(id) => format!("&struct @{id}"),
     }
 }
@@ -86,6 +115,7 @@ fn local_kind_name(kind: LocalKind) -> &'static str {
         LocalKind::Temporary => "temporary",
         LocalKind::CheckedValue => "checked-value",
         LocalKind::CheckedOverflow => "checked-overflow",
+        LocalKind::Discriminant => "discriminant",
     }
 }
 
@@ -129,6 +159,17 @@ fn format_rvalue(value: &Rvalue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Rvalue::Variant { ty, variant, fields } => format!(
+            "variant @{ty}#{variant} {{ {} }}",
+            fields
+                .iter()
+                .map(format_operand)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Rvalue::Discriminant { source } => {
+            format!("discriminant {}", format_operand(source))
+        }
         Rvalue::SharedBorrow { source } => {
             format!("borrow_shared {}", format_operand_without_mode(source))
         }
@@ -214,13 +255,8 @@ fn format_operand(operand: &Operand) -> String {
     match operand {
         Operand::Copy(local) => format!("copy %{local}"),
         Operand::Move(local) => format!("move %{local}"),
-        Operand::Project {
-            base,
-            deref,
-            fields,
-            moved,
-        } => {
-            let place = format_projected_place(*base, *deref, fields);
+        Operand::Project { base, path, moved } => {
+            let place = format_projected_place(*base, path);
             format!("{} {place}", if *moved { "move" } else { "copy" })
         }
         Operand::Constant(constant) => match constant {
@@ -235,27 +271,22 @@ fn format_operand_without_mode(operand: &Operand) -> String {
     match operand {
         Operand::Constant(_) => format_operand(operand),
         Operand::Copy(local) | Operand::Move(local) => format!("%{local}"),
-        Operand::Project {
-            base,
-            deref,
-            fields,
-            ..
-        } => format_projected_place(*base, *deref, fields),
+        Operand::Project { base, path, .. } => format_projected_place(*base, path),
     }
 }
 
-fn format_projected_place(base: crate::LocalId, deref: bool, fields: &[crate::FieldId]) -> String {
-    let mut place = if deref {
-        if fields.is_empty() {
-            format!("*%{base}")
-        } else {
-            format!("(*%{base})")
+fn format_projected_place(base: crate::LocalId, path: &[ProjectElem]) -> String {
+    let mut place = format!("%{base}");
+    for element in path {
+        match element {
+            ProjectElem::Deref => place = format!("(*{place})"),
+            ProjectElem::Downcast(variant) => {
+                write!(place, "#{variant}").expect("writing to a String cannot fail");
+            }
+            ProjectElem::Field(field) => {
+                write!(place, ".{field}").expect("writing to a String cannot fail");
+            }
         }
-    } else {
-        format!("%{base}")
-    };
-    for field in fields {
-        write!(place, ".{field}").expect("writing to a String cannot fail");
     }
     place
 }
@@ -305,9 +336,9 @@ fn unwind_name(action: UnwindAction) -> String {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AssertKind, BinaryOp, BlockId, Constant, FunctionId, LocalId, LocalKind, OmBlock,
-        OmFunction, OmLocal, OmProgram, OmType, Operand, Rvalue, Statement, SwitchValue,
-        Terminator, UnwindAction,
+        AssertKind, BinaryOp, BlockId, Constant, FieldId, FunctionId, LocalId, LocalKind, OmBlock,
+        OmEnum, OmField, OmFunction, OmLocal, OmProgram, OmType, OmVariant, Operand, ProjectElem,
+        Rvalue, Statement, SwitchValue, Terminator, TypeId, UnwindAction, VariantId,
     };
 
     #[test]
@@ -315,6 +346,7 @@ mod tests {
         let program = OmProgram {
             entry: FunctionId::new(0),
             structs: vec![],
+            enums: vec![],
             functions: vec![OmFunction {
                 id: FunctionId::new(0),
                 name: "omlua_input::main".to_owned(),
@@ -390,6 +422,144 @@ mod tests {
                 "  bb1:\n",
                 "    assert copy %2 == false overflow_neg(copy %1) -> bb2 unwind continue\n",
                 "  bb2:\n",
+                "    return\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
+    fn formats_enums_and_match_deterministically() {
+        let command = TypeId::new(0);
+        let program = OmProgram {
+            entry: FunctionId::new(0),
+            structs: vec![],
+            enums: vec![OmEnum {
+                id: command,
+                name: "omlua_input::Command".to_owned(),
+                variants: vec![
+                    OmVariant {
+                        id: VariantId::new(0),
+                        name: "Stop".to_owned(),
+                        fields: vec![],
+                    },
+                    OmVariant {
+                        id: VariantId::new(1),
+                        name: "GoTo".to_owned(),
+                        fields: vec![
+                            OmField {
+                                id: FieldId::new(0),
+                                name: "x".to_owned(),
+                                ty: OmType::I32,
+                            },
+                            OmField {
+                                id: FieldId::new(1),
+                                name: "y".to_owned(),
+                                ty: OmType::I32,
+                            },
+                        ],
+                    },
+                    OmVariant {
+                        id: VariantId::new(2),
+                        name: "SetThrottle".to_owned(),
+                        fields: vec![OmField {
+                            id: FieldId::new(0),
+                            name: "0".to_owned(),
+                            ty: OmType::I32,
+                        }],
+                    },
+                ],
+            }],
+            functions: vec![OmFunction {
+                id: FunctionId::new(0),
+                name: "omlua_input::main".to_owned(),
+                return_type: OmType::Unit,
+                parameters: vec![],
+                locals: vec![
+                    OmLocal {
+                        id: LocalId::new(0),
+                        ty: OmType::Unit,
+                        kind: LocalKind::Return,
+                    },
+                    OmLocal {
+                        id: LocalId::new(1),
+                        ty: OmType::Enum(command),
+                        kind: LocalKind::Temporary,
+                    },
+                    OmLocal {
+                        id: LocalId::new(2),
+                        ty: OmType::I32,
+                        kind: LocalKind::Discriminant,
+                    },
+                    OmLocal {
+                        id: LocalId::new(3),
+                        ty: OmType::I32,
+                        kind: LocalKind::Temporary,
+                    },
+                ],
+                blocks: vec![OmBlock {
+                    id: BlockId::new(0),
+                    statements: vec![
+                        Statement::Assign {
+                            destination: LocalId::new(1),
+                            value: Rvalue::Variant {
+                                ty: command,
+                                variant: VariantId::new(1),
+                                fields: vec![
+                                    Operand::Constant(Constant::I32(20)),
+                                    Operand::Constant(Constant::I32(22)),
+                                ],
+                            },
+                        },
+                        Statement::Assign {
+                            destination: LocalId::new(2),
+                            value: Rvalue::Discriminant {
+                                source: Operand::Copy(LocalId::new(1)),
+                            },
+                        },
+                        Statement::Assign {
+                            destination: LocalId::new(3),
+                            value: Rvalue::Use(Operand::Project {
+                                base: LocalId::new(1),
+                                path: vec![
+                                    ProjectElem::Downcast(VariantId::new(1)),
+                                    ProjectElem::Field(FieldId::new(0)),
+                                ],
+                                moved: true,
+                            }),
+                        },
+                    ],
+                    terminator: Terminator::Return,
+                }],
+            }],
+        };
+
+        assert_eq!(
+            program.to_string(),
+            concat!(
+                "program entry @0\n",
+                "\n",
+                "enum @0 omlua_input::Command {\n",
+                "  v0 Stop\n",
+                "  v1 GoTo {\n",
+                "    .0 x: i32\n",
+                "    .1 y: i32\n",
+                "  }\n",
+                "  v2 SetThrottle {\n",
+                "    .0 0: i32\n",
+                "  }\n",
+                "}\n",
+                "\n",
+                "fn @0 omlua_input::main() -> unit {\n",
+                "  locals:\n",
+                "    %0: unit return\n",
+                "    %1: enum @0 temporary\n",
+                "    %2: i32 discriminant\n",
+                "    %3: i32 temporary\n",
+                "  bb0:\n",
+                "    %1 = variant @0#1 { 20_i32, 22_i32 }\n",
+                "    %2 = discriminant copy %1\n",
+                "    %3 = move %1#1.0\n",
                 "    return\n",
                 "}\n",
             )

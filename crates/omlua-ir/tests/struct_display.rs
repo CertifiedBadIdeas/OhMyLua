@@ -1,6 +1,7 @@
 use omlua_ir::{
     BlockId, Constant, FieldId, FunctionId, LocalId, LocalKind, OmBlock, OmField, OmFunction,
-    OmLocal, OmProgram, OmStruct, OmType, Operand, Rvalue, Statement, Terminator, TypeId,
+    OmLocal, OmProgram, OmStruct, OmType, Operand, ProjectElem, Rvalue, Statement, Terminator,
+    TypeId,
 };
 
 #[test]
@@ -24,6 +25,7 @@ fn formats_structs_and_shared_references_deterministically() {
                 },
             ],
         }],
+        enums: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "main".to_owned(),
@@ -74,8 +76,7 @@ fn formats_structs_and_shared_references_deterministically() {
                         destination: LocalId::new(3),
                         value: Rvalue::Use(Operand::Project {
                             base: LocalId::new(2),
-                            deref: true,
-                            fields: vec![FieldId::new(0)],
+                            path: vec![ProjectElem::Deref, ProjectElem::Field(FieldId::new(0))],
                             moved: false,
                         }),
                     },

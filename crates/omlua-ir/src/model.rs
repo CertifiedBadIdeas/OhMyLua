@@ -1,15 +1,30 @@
-use crate::{BlockId, FieldId, FunctionId, LocalId, TypeId};
+use crate::{BlockId, FieldId, FunctionId, LocalId, TypeId, VariantId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OmProgram {
     pub entry: FunctionId,
     pub structs: Vec<OmStruct>,
+    pub enums: Vec<OmEnum>,
     pub functions: Vec<OmFunction>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OmStruct {
     pub id: TypeId,
+    pub name: String,
+    pub fields: Vec<OmField>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OmEnum {
+    pub id: TypeId,
+    pub name: String,
+    pub variants: Vec<OmVariant>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OmVariant {
+    pub id: VariantId,
     pub name: String,
     pub fields: Vec<OmField>,
 }
@@ -45,6 +60,7 @@ pub enum LocalKind {
     Temporary,
     CheckedValue,
     CheckedOverflow,
+    Discriminant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +69,7 @@ pub enum OmType {
     Bool,
     I32,
     Struct(TypeId),
+    Enum(TypeId),
     SharedRef(TypeId),
 }
 
@@ -94,6 +111,14 @@ pub enum Rvalue {
         ty: TypeId,
         fields: Vec<Operand>,
     },
+    Variant {
+        ty: TypeId,
+        variant: VariantId,
+        fields: Vec<Operand>,
+    },
+    Discriminant {
+        source: Operand,
+    },
     SharedBorrow {
         source: Operand,
     },
@@ -105,11 +130,17 @@ pub enum Operand {
     Move(LocalId),
     Project {
         base: LocalId,
-        deref: bool,
-        fields: Vec<FieldId>,
+        path: Vec<ProjectElem>,
         moved: bool,
     },
     Constant(Constant),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectElem {
+    Deref,
+    Downcast(VariantId),
+    Field(FieldId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
