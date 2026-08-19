@@ -1,12 +1,8 @@
 [package]
-name = "omlua-rustc"
+name = "omlua-ir"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-build = "build.rs"
 
 [lib]
 path = "src/lib.rs"
-
-[dependencies]
-omlua-ir = { path = "../omlua-ir" }

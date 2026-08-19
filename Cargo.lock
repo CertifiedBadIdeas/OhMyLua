@@ -10,9 +10,17 @@ version = "0.1.0"
 name = "omlua-driver"
 version = "0.1.0"
 dependencies = [
+ "omlua-ir",
  "omlua-rustc",
 ]
 
 [[package]]
+name = "omlua-ir"
+version = "0.1.0"
+
+[[package]]
 name = "omlua-rustc"
 version = "0.1.0"
+dependencies = [
+ "omlua-ir",
+]

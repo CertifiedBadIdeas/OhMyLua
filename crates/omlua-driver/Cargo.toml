@@ -5,4 +5,5 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+omlua-ir = { path = "../omlua-ir" }
 omlua-rustc = { path = "../omlua-rustc" }
