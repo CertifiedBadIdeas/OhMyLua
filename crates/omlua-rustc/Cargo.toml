@@ -10,3 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 omlua-ir = { path = "../omlua-ir" }
+
+[package.metadata.rust-analyzer]
+rustc_private = true
