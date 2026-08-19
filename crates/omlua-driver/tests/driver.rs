@@ -429,6 +429,34 @@ fn lowers_enums_variants_and_match_to_omir() {
 }
 
 #[test]
+fn lowers_monomorphized_std_option_and_result_enums() {
+    let output = compile("option_result.rs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+
+    let omir = String::from_utf8(output.stdout).unwrap();
+    assert!(omir.contains("enum @0 Option<i32> {"));
+    assert!(omir.contains("  v0 None\n"));
+    assert!(omir.contains("  v1 Some {\n    .0 0: i32\n  }\n"));
+    assert!(omir.contains("enum @1 Option<Result<i32, MyErr>> {"));
+    assert!(omir.contains("    .0 0: enum @2\n"));
+    assert!(omir.contains("enum @2 Result<i32, MyErr> {"));
+    assert!(omir.contains("  v0 Ok {\n    .0 0: i32\n  }\n"));
+    assert!(omir.contains("  v1 Err {\n    .0 0: struct @3\n  }\n"));
+    assert!(omir.contains("variant @0#1 { 21_i32 }"));
+    assert!(omir.contains("variant @0#0 {  }"));
+    assert!(omir.contains("variant @2#0 { 7_i32 }"));
+    assert!(omir.contains("variant @1#1 { move %10 }"));
+    assert!(omir.contains("copy %9#1.0#0.0"));
+    assert!(omir.contains("%0 = variant @2#1 { move %6 }"));
+    assert!(omir.contains("%0 = variant @2#0 { move %3 }"));
+}
+
+#[test]
 fn rejects_enum_references_and_ref_mut_bindings_without_partial_output() {
     let enum_ref = compile("unsupported_enum_ref.rs");
     assert!(!enum_ref.status.success());

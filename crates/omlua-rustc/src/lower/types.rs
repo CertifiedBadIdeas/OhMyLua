@@ -8,7 +8,9 @@ use rustc_span::def_id::DefId;
 use crate::LowerError;
 
 pub(super) struct TypeRegistry {
-    ids: HashMap<DefId, TypeId>,
+    struct_ids: HashMap<DefId, TypeId>,
+    local_enum_ids: HashMap<DefId, TypeId>,
+    core_enum_ids: HashMap<String, TypeId>,
     definitions: Vec<Option<Nominal>>,
 }
 
@@ -20,7 +22,9 @@ enum Nominal {
 impl TypeRegistry {
     pub(super) fn new() -> Self {
         Self {
-            ids: HashMap::new(),
+            struct_ids: HashMap::new(),
+            local_enum_ids: HashMap::new(),
+            core_enum_ids: HashMap::new(),
             definitions: Vec::new(),
         }
     }
@@ -59,10 +63,6 @@ impl TypeRegistry {
             ))),
             _ => Err(LowerError::program(format!("type `{ty}` is not supported"))),
         }
-    }
-
-    pub(super) fn type_id(&self, def_id: DefId) -> Option<TypeId> {
-        self.ids.get(&def_id).copied()
     }
 
     pub(super) fn definition(&self, id: TypeId) -> Option<&OmStruct> {
@@ -111,7 +111,7 @@ impl TypeRegistry {
                 tcx.def_path_str(def_id)
             )));
         }
-        if let Some(id) = self.ids.get(&def_id) {
+        if let Some(id) = self.struct_ids.get(&def_id) {
             return Ok(*id);
         }
 
@@ -138,7 +138,7 @@ impl TypeRegistry {
         let index = u32::try_from(self.definitions.len())
             .map_err(|_| LowerError::program("structure count exceeds OMIR limits"))?;
         let id = TypeId::new(index);
-        self.ids.insert(def_id, id);
+        self.struct_ids.insert(def_id, id);
         self.definitions.push(None);
 
         let mut fields = Vec::with_capacity(variant.fields.len());
@@ -184,21 +184,30 @@ impl TypeRegistry {
         def_id: DefId,
         arguments: ty::GenericArgsRef<'tcx>,
     ) -> Result<TypeId, LowerError> {
-        if !def_id.is_local() {
-            return Err(LowerError::program(format!(
-                "external enum `{}` is not supported",
-                tcx.def_path_str(def_id)
-            )));
-        }
-        if !arguments.is_empty() || tcx.generics_of(def_id).count() != 0 {
-            return Err(LowerError::program(format!(
-                "generic enum `{}` is not supported",
-                tcx.def_path_str(def_id)
-            )));
-        }
-        if let Some(id) = self.ids.get(&def_id) {
-            return Ok(*id);
-        }
+        let name = if def_id.is_local() {
+            if !arguments.is_empty() || tcx.generics_of(def_id).count() != 0 {
+                return Err(LowerError::program(format!(
+                    "generic enum `{}` is not supported",
+                    tcx.def_path_str(def_id)
+                )));
+            }
+            if let Some(id) = self.local_enum_ids.get(&def_id) {
+                return Ok(*id);
+            }
+            tcx.def_path_str(def_id)
+        } else {
+            let base = core_try_enum_name(tcx, def_id).ok_or_else(|| {
+                LowerError::program(format!(
+                    "external enum `{}` is not supported",
+                    tcx.def_path_str(def_id)
+                ))
+            })?;
+            let name = core_enum_name(base, arguments);
+            if let Some(id) = self.core_enum_ids.get(&name) {
+                return Ok(*id);
+            }
+            name
+        };
 
         let definition = tcx.adt_def(def_id);
         if definition.has_dtor(tcx) {
@@ -211,7 +220,11 @@ impl TypeRegistry {
         let index = u32::try_from(self.definitions.len())
             .map_err(|_| LowerError::program("enum count exceeds OMIR limits"))?;
         let id = TypeId::new(index);
-        self.ids.insert(def_id, id);
+        if def_id.is_local() {
+            self.local_enum_ids.insert(def_id, id);
+        } else {
+            self.core_enum_ids.insert(name.clone(), id);
+        }
         self.definitions.push(None);
 
         let mut variants = Vec::with_capacity(definition.variants().len());
@@ -253,9 +266,37 @@ impl TypeRegistry {
 
         self.definitions[id.index() as usize] = Some(Nominal::Enum(OmEnum {
             id,
-            name: tcx.def_path_str(def_id),
+            name,
             variants,
         }));
         Ok(id)
     }
+}
+
+fn core_try_enum_name(tcx: TyCtxt<'_>, def_id: DefId) -> Option<&'static str> {
+    match tcx.def_path_str(def_id).as_str() {
+        "std::option::Option" => Some("Option"),
+        "std::result::Result" => Some("Result"),
+        "std::ops::ControlFlow" => Some("ControlFlow"),
+        "std::convert::Infallible" => Some("Infallible"),
+        _ => None,
+    }
+}
+
+fn core_enum_name(base: &'static str, arguments: ty::GenericArgsRef<'_>) -> String {
+    if arguments.is_empty() {
+        return base.to_owned();
+    }
+    format!(
+        "{base}<{}>",
+        arguments
+            .types()
+            .map(|ty| ty.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .replace("std::result::Result", "Result")
+    .replace("std::option::Option", "Option")
+    .replace("std::ops::ControlFlow", "ControlFlow")
+    .replace("std::convert::Infallible", "Infallible")
 }

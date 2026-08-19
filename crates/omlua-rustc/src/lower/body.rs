@@ -158,7 +158,7 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
     }
 
     fn lower_statement(
-        &self,
+        &mut self,
         block: BasicBlock,
         kind: &StatementKind<'tcx>,
     ) -> Result<Option<Statement>, LowerError> {
@@ -190,7 +190,11 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
 
                 Ok(Some(Statement::Assign {
                     destination: self.lower_place(block, place)?,
-                    value: self.lower_rvalue(block, value)?,
+                    value: self.lower_rvalue(
+                        block,
+                        value,
+                        place.ty(&self.body.local_decls, self.tcx).ty,
+                    )?,
                 }))
             }
             StatementKind::StorageLive(_) | StatementKind::StorageDead(_) | StatementKind::Nop => {
@@ -203,9 +207,10 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
     }
 
     fn lower_rvalue(
-        &self,
+        &mut self,
         block: BasicBlock,
         value: &MirRvalue<'tcx>,
+        destination_ty: Ty<'tcx>,
     ) -> Result<Rvalue, LowerError> {
         match value {
             MirRvalue::Use(operand, _) => Ok(Rvalue::Use(self.lower_operand(block, operand)?)),
@@ -231,36 +236,36 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                 right: self.lower_operand(block, &operands.1)?,
             }),
             MirRvalue::Aggregate(kind, operands) => {
-                let AggregateKind::Adt(def_id, variant, _, _, _) = kind.as_ref() else {
+                let AggregateKind::Adt(_, variant, _, _, _) = kind.as_ref() else {
                     return Err(self.block_error(block, "non-structure aggregate is not supported"));
                 };
-                let definition = self.tcx.adt_def(*def_id);
-                let ty = self.registry.types.type_id(*def_id).ok_or_else(|| {
-                    self.block_error(
-                        block,
-                        format!(
-                            "structure `{}` was not registered",
-                            self.tcx.def_path_str(*def_id)
-                        ),
-                    )
-                })?;
+                let ty = self
+                    .registry
+                    .types
+                    .lower_type(self.tcx, destination_ty)
+                    .map_err(|error| self.block_error(block, error.detail()))?;
                 let fields = operands
                     .iter()
                     .map(|operand| self.lower_operand(block, operand))
                     .collect::<Result<_, _>>()?;
-                if definition.is_enum() {
-                    Ok(Rvalue::Variant {
-                        ty,
+                match ty {
+                    OmType::Enum(id) => Ok(Rvalue::Variant {
+                        ty: id,
                         variant: VariantId::new(variant.as_u32()),
                         fields,
-                    })
-                } else {
-                    if variant.as_usize() != 0 {
-                        return Err(
-                            self.block_error(block, "non-structure aggregate is not supported")
-                        );
+                    }),
+                    OmType::Struct(id) => {
+                        if variant.as_usize() != 0 {
+                            return Err(
+                                self.block_error(block, "non-structure aggregate is not supported")
+                            );
+                        }
+                        Ok(Rvalue::Struct { ty: id, fields })
                     }
-                    Ok(Rvalue::Struct { ty, fields })
+                    _ => Err(self.block_error(
+                        block,
+                        "aggregate destination is not a structure or enum type",
+                    )),
                 }
             }
             MirRvalue::Ref(_, borrow_kind, place) => {
