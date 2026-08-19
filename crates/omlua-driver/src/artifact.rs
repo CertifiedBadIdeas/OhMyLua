@@ -8,11 +8,25 @@ static NEXT_ARTIFACT: AtomicU64 = AtomicU64::new(0);
 pub struct LuaArtifact {
     final_path: PathBuf,
     temporary_path: PathBuf,
+    _lock_file: fs::File,
 }
 
 impl LuaArtifact {
     pub fn prepare(project_dir: &Path) -> io::Result<Self> {
         let output_directory = project_dir.join("target").join("omlua");
+        fs::create_dir_all(&output_directory)
+            .map_err(|error| path_error("create Lua output directory", &output_directory, error))?;
+        let lock_path = output_directory.join(".build.lock");
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|error| path_error("open Lua build lock", &lock_path, error))?;
+        lock_file
+            .lock()
+            .map_err(|error| path_error("lock Lua build", &lock_path, error))?;
         let final_path = output_directory.join("program.lua");
         match fs::remove_file(&final_path) {
             Ok(()) => {}
@@ -30,6 +44,7 @@ impl LuaArtifact {
         Ok(Self {
             final_path,
             temporary_path,
+            _lock_file: lock_file,
         })
     }
 
@@ -157,11 +172,45 @@ mod tests {
         reset(&directory);
         fs::create_dir(directory.join("target")).unwrap();
         fs::write(directory.join("target/omlua"), "not a directory").unwrap();
-        let artifact = LuaArtifact::prepare(&directory).unwrap();
-
-        let error = artifact.commit("return 42\n").unwrap_err();
+        let error = LuaArtifact::prepare(&directory).err().unwrap();
         assert!(error.to_string().contains("create Lua output directory"));
         assert!(!directory.join("target/omlua/program.lua").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_builds_are_serialized_for_the_whole_artifact_lifetime() {
+        use std::sync::{Arc, Barrier, mpsc};
+        use std::thread;
+        use std::time::Duration;
+
+        let directory = directory("locking");
+        reset(&directory);
+        let first = LuaArtifact::prepare(&directory).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let thread_barrier = Arc::clone(&barrier);
+        let thread_directory = directory.clone();
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            thread_barrier.wait();
+            sender
+                .send(LuaArtifact::prepare(&thread_directory))
+                .unwrap();
+        });
+
+        barrier.wait();
+        thread::sleep(Duration::from_millis(50));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(first);
+        let second = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        drop(second);
+        handle.join().unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 }

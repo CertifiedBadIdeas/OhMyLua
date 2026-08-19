@@ -117,6 +117,54 @@ fn lowers_boolean_switches_to_boolean_branches() {
     );
 }
 
+#[test]
+fn decodes_signed_i32_switch_values_from_their_rustc_bits() {
+    let program = OmProgram {
+        entry: FunctionId::new(0),
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "choose".to_owned(),
+            return_type: OmType::Unit,
+            parameters: vec![LocalId::new(1)],
+            locals: vec![
+                om_local(0, OmType::Unit, LocalKind::Return),
+                om_local(1, OmType::I32, LocalKind::Parameter),
+            ],
+            blocks: vec![
+                OmBlock {
+                    id: BlockId::new(0),
+                    statements: Vec::new(),
+                    terminator: Terminator::SwitchInt {
+                        discriminant: Operand::Copy(LocalId::new(1)),
+                        targets: vec![(SwitchValue(u128::from(u32::MAX)), BlockId::new(1))],
+                        otherwise: BlockId::new(2),
+                    },
+                },
+                OmBlock {
+                    id: BlockId::new(1),
+                    statements: Vec::new(),
+                    terminator: Terminator::Return,
+                },
+                OmBlock {
+                    id: BlockId::new(2),
+                    statements: Vec::new(),
+                    terminator: Terminator::Return,
+                },
+            ],
+        }],
+    };
+
+    let lir = lower_program(&program, &LuaBackendProfile::lua54()).unwrap();
+    assert_eq!(
+        lir.functions[0].blocks[0].terminator,
+        LirTerminator::Switch {
+            discriminant: LirExpression::Value(LirValue::Local(LirLocalId::new(1))),
+            targets: vec![(-1, LirBlockId::new(1))],
+            otherwise: LirBlockId::new(2),
+        }
+    );
+}
+
 fn division_program() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),

@@ -8,6 +8,8 @@ use omlua_lua_ir::{
 
 use crate::CodegenError;
 
+const LUA54_MAX_LOCALS_PER_FUNCTION: usize = 200;
+
 pub(crate) fn validate(
     program: &LirProgram,
     profile: &LuaBackendProfile,
@@ -30,6 +32,11 @@ pub(crate) fn validate(
     }
 
     let helpers = unique_helpers(&program.helpers)?;
+    if program.helpers.len() + program.functions.len() > LUA54_MAX_LOCALS_PER_FUNCTION {
+        return Err(error(format!(
+            "the generated chunk would declare more than {LUA54_MAX_LOCALS_PER_FUNCTION} local names"
+        )));
+    }
     if let Some(remainder_index) = program
         .helpers
         .iter()
@@ -41,9 +48,15 @@ pub(crate) fn validate(
         ));
     }
     let functions = unique_functions(&program.functions)?;
-    if !functions.contains_key(&program.entry) {
-        return Err(error(format!(
+    let entry = functions.get(&program.entry).ok_or_else(|| {
+        error(format!(
             "entry function f{} does not exist",
+            program.entry.index()
+        ))
+    })?;
+    if !entry.parameters.is_empty() {
+        return Err(error(format!(
+            "entry function f{} must not have parameters",
             program.entry.index()
         )));
     }
@@ -99,6 +112,11 @@ fn validate_function(
     used_helpers: &mut BTreeSet<RuntimeHelper>,
 ) -> Result<(), CodegenError> {
     let context = format!("function f{}", function.id.index());
+    if function.locals.len() > LUA54_MAX_LOCALS_PER_FUNCTION {
+        return Err(error(format!(
+            "{context} declares more than {LUA54_MAX_LOCALS_PER_FUNCTION} local names"
+        )));
+    }
     let mut locals = BTreeMap::new();
     for local in &function.locals {
         if locals.insert(local.id, local.kind).is_some() {

@@ -277,14 +277,8 @@ impl<'a> FunctionLowerer<'a> {
                         targets: targets
                             .iter()
                             .map(|(value, target)| {
-                                i64::try_from(value.0)
+                                self.decode_i32_switch_value(block, value.0)
                                     .map(|value| (value, LirBlockId::new(target.index())))
-                                    .map_err(|_| {
-                                        self.block_error(
-                                            block,
-                                            "switch value does not fit Lua integer",
-                                        )
-                                    })
                             })
                             .collect::<Result<_, _>>()?,
                         otherwise: LirBlockId::new(otherwise.index()),
@@ -398,6 +392,12 @@ impl<'a> FunctionLowerer<'a> {
             Operand::Constant(Constant::Bool(_)) => Ok(OmType::Bool),
             Operand::Constant(Constant::I32(_)) => Ok(OmType::I32),
         }
+    }
+
+    fn decode_i32_switch_value(&self, block: u32, value: u128) -> Result<i64, LowerError> {
+        let bits = u32::try_from(value)
+            .map_err(|_| self.block_error(block, "i32 switch value contains more than 32 bits"))?;
+        Ok(i64::from(bits as i32))
     }
 
     fn block_error(&self, block: u32, detail: impl Into<String>) -> LowerError {
