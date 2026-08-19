@@ -1,0 +1,2 @@
+[env]
+RUSTC_BOOTSTRAP = { value = "omlua_rustc,omlua_driver", force = true }

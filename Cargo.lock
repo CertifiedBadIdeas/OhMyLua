@@ -5,3 +5,14 @@ version = 4
 [[package]]
 name = "omlua"
 version = "0.1.0"
+
+[[package]]
+name = "omlua-driver"
+version = "0.1.0"
+dependencies = [
+ "omlua-rustc",
+]
+
+[[package]]
+name = "omlua-rustc"
+version = "0.1.0"

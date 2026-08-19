@@ -1,0 +1,8 @@
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+components = [
+    "rustc-dev",
+    "llvm-tools",
+    "rust-src",
+]
