@@ -553,6 +553,35 @@ fn builds_and_executes_the_exact_while_loop_artifact() {
 }
 
 #[test]
+fn lowers_for_loops_over_integer_ranges() {
+    let output = compile("for_range.rs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+
+    let omir = String::from_utf8(output.stdout).unwrap();
+    assert!(omir.contains("struct @0 Range<i32> {"));
+    assert!(omir.contains("  .0 start: i32\n"));
+    assert!(omir.contains("  .1 end: i32\n"));
+    assert!(omir.contains("enum @1 Option<i32> {"));
+    assert!(omir.contains("%3 = struct @0 { 0_i32, 10_i32 }"));
+    assert!(omir.contains("%2 = call @1(move %3)"));
+    assert!(omir.contains("%16 = lt copy %14, copy %15"));
+    assert!(omir.contains("switch move %16 [0: bb9, 1: bb10, otherwise: bb11]"));
+    assert!(omir.contains("%17 = add copy %14, 1_i32"));
+    assert!(omir.contains("%4 = struct @0 { copy %17, copy %15 }"));
+    assert!(omir.contains("%5 = variant @1#1 { move %17 }"));
+    assert!(omir.contains("  bb9:\n    goto bb3"));
+    assert!(omir.contains("  bb10:\n    %17 = add copy %14, 1_i32"));
+    assert!(omir.contains("  bb7:\n    %1 = move %9\n    goto bb2"));
+    assert!(omir.contains("fn @1 __omlua_range_into_iter<i32>(%1) -> struct @0 {"));
+    assert!(omir.contains("  bb0:\n    %0 = move %1\n    return"));
+}
+
+#[test]
 fn rejects_external_enums_outside_the_try_whitelist_without_partial_output() {
     let external = compile("unsupported_external_enum.rs");
     assert!(!external.status.success());

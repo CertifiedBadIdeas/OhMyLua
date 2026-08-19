@@ -8,69 +8,79 @@ use crate::LowerError;
 
 use super::types::{normalize_core_enum_path, TypeRegistry};
 
-/// A call to a core `Try`/`FromResidual` method that the adapter desugars structurally
-/// instead of registering as an external callee. The carried types are the instantiated
-/// self/flow/residual types observed at the call site.
-pub(super) enum TryCall<'tcx> {
+/// A call to a core `Try`/`FromResidual`/`IntoIterator` method that the adapter
+/// desugars structurally instead of registering as an external callee. The carried
+/// types are the instantiated self/flow/residual types observed at the call site.
+pub(super) enum SyntheticCall<'tcx> {
     OptionBranch { option: Ty<'tcx>, flow: Ty<'tcx> },
     ResultBranch { result: Ty<'tcx>, flow: Ty<'tcx> },
     OptionFromResidual { option: Ty<'tcx> },
     ResultFromResidual { result: Ty<'tcx>, residual: Ty<'tcx> },
+    RangeIntoIter { range: Ty<'tcx> },
 }
 
-impl TryCall<'_> {
+impl SyntheticCall<'_> {
     pub(super) fn name(&self) -> String {
         let render = |ty: Ty<'_>| normalize_core_enum_path(&ty.to_string());
         match self {
-            TryCall::OptionBranch { option, .. } => {
+            SyntheticCall::OptionBranch { option, .. } => {
                 format!("__omlua_option_branch<{}>", render(adt_argument(*option, 0)))
             }
-            TryCall::ResultBranch { result, .. } => format!(
+            SyntheticCall::ResultBranch { result, .. } => format!(
                 "__omlua_result_branch<{}, {}>",
                 render(adt_argument(*result, 0)),
                 render(adt_argument(*result, 1))
             ),
-            TryCall::OptionFromResidual { option } => {
+            SyntheticCall::OptionFromResidual { option } => {
                 format!(
                     "__omlua_option_from_residual<{}>",
                     render(adt_argument(*option, 0))
                 )
             }
-            TryCall::ResultFromResidual { result, .. } => format!(
+            SyntheticCall::ResultFromResidual { result, .. } => format!(
                 "__omlua_result_from_residual<{}, {}>",
                 render(adt_argument(*result, 0)),
                 render(adt_argument(*result, 1))
             ),
+            SyntheticCall::RangeIntoIter { range } => {
+                format!(
+                    "__omlua_range_into_iter<{}>",
+                    render(adt_argument(*range, 0))
+                )
+            }
         }
     }
 }
 
 fn adt_argument(ty: Ty<'_>, index: usize) -> Ty<'_> {
     let ty::Adt(_, arguments) = ty.kind() else {
-        unreachable!("Try calls are only classified for Option and Result self types");
+        unreachable!("synthetic calls are only classified for whitelisted nominal types");
     };
     arguments.type_at(index)
 }
 
-pub(super) fn synthesize_try_helper<'tcx>(
+pub(super) fn synthesize_synthetic_call<'tcx>(
     tcx: TyCtxt<'tcx>,
     id: FunctionId,
     name: &str,
-    call: &TryCall<'tcx>,
+    call: &SyntheticCall<'tcx>,
     types: &mut TypeRegistry,
 ) -> Result<OmFunction, LowerError> {
     match call {
-        TryCall::OptionBranch { option, flow } => {
+        SyntheticCall::OptionBranch { option, flow } => {
             option_branch(tcx, id, name, types, *option, *flow)
         }
-        TryCall::ResultBranch { result, flow } => {
+        SyntheticCall::ResultBranch { result, flow } => {
             result_branch(tcx, id, name, types, *result, *flow)
         }
-        TryCall::OptionFromResidual { option } => {
+        SyntheticCall::OptionFromResidual { option } => {
             option_from_residual(tcx, id, name, types, *option)
         }
-        TryCall::ResultFromResidual { result, residual } => {
+        SyntheticCall::ResultFromResidual { result, residual } => {
             result_from_residual(tcx, id, name, types, *result, *residual)
+        }
+        SyntheticCall::RangeIntoIter { range } => {
+            range_into_iter(tcx, id, name, types, *range)
         }
     }
 }
@@ -83,9 +93,52 @@ fn om_enum<'tcx>(
     match types.lower_type(tcx, ty)? {
         OmType::Enum(id) => Ok(id),
         _ => Err(LowerError::program(format!(
-            "Try helper type `{ty}` did not lower to an enum"
+            "synthetic helper type `{ty}` did not lower to an enum"
         ))),
     }
+}
+
+fn om_struct<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    types: &mut TypeRegistry,
+    ty: Ty<'tcx>,
+) -> Result<TypeId, LowerError> {
+    match types.lower_type(tcx, ty)? {
+        OmType::Struct(id) => Ok(id),
+        _ => Err(LowerError::program(format!(
+            "synthetic helper type `{ty}` did not lower to a structure"
+        ))),
+    }
+}
+
+fn range_into_iter<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    id: FunctionId,
+    name: &str,
+    types: &mut TypeRegistry,
+    range: Ty<'tcx>,
+) -> Result<OmFunction, LowerError> {
+    let range_id = om_struct(tcx, types, range)?;
+
+    let mut locals = Vec::new();
+    let returned = push(OmType::Struct(range_id), LocalKind::Return, &mut locals);
+    let parameter = push(OmType::Struct(range_id), LocalKind::Parameter, &mut locals);
+
+    Ok(OmFunction {
+        id,
+        name: name.to_owned(),
+        return_type: OmType::Struct(range_id),
+        parameters: vec![parameter],
+        locals,
+        blocks: vec![OmBlock {
+            id: BlockId::new(0),
+            statements: vec![Statement::Assign {
+                destination: returned,
+                value: Rvalue::Use(Operand::Move(parameter)),
+            }],
+            terminator: Terminator::Return,
+        }],
+    })
 }
 
 fn option_branch<'tcx>(

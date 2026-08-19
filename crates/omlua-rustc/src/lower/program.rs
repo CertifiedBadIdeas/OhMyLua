@@ -8,7 +8,7 @@ use rustc_span::def_id::DefId;
 use crate::LowerError;
 
 use super::body::lower_function;
-use super::try_helper::{synthesize_try_helper, TryCall};
+use super::synthetic_helper::{synthesize_synthetic_call, SyntheticCall};
 use super::types::TypeRegistry;
 
 pub(crate) fn lower_program(tcx: TyCtxt<'_>) -> Result<OmProgram, LowerError> {
@@ -111,7 +111,7 @@ impl FunctionRegistry {
         &mut self,
         tcx: TyCtxt<'tcx>,
         name: String,
-        call: &TryCall<'tcx>,
+        call: &SyntheticCall<'tcx>,
     ) -> Result<FunctionId, LowerError> {
         if let Some(id) = self.synthetic_ids.get(&name) {
             return Ok(*id);
@@ -119,7 +119,7 @@ impl FunctionRegistry {
         let index = u32::try_from(self.slots.len())
             .map_err(|_| LowerError::program("function count exceeds OMIR limits"))?;
         let id = FunctionId::new(index);
-        let function = synthesize_try_helper(tcx, id, &name, call, &mut self.types)?;
+        let function = synthesize_synthetic_call(tcx, id, &name, call, &mut self.types)?;
         self.synthetic_ids.insert(name, id);
         self.slots.push(Some(function));
         Ok(id)

@@ -58,9 +58,22 @@ impl TypeRegistry {
                 self.register_struct(tcx, definition.did(), arguments)
                     .map(OmType::SharedRef)
             }
-            ty::Ref(_, _, Mutability::Mut) => Err(LowerError::program(format!(
-                "mutable reference `{ty}` is not supported"
-            ))),
+            ty::Ref(_, inner, Mutability::Mut) => match inner.kind() {
+                ty::Adt(definition, arguments)
+                    if definition.is_struct() && core_range_name(tcx, definition.did()).is_some() =>
+                {
+                    if !is_i32_range(arguments) {
+                        return Err(LowerError::program(format!(
+                            "range `{ty}` is not supported; only `Range<i32>` is supported"
+                        )));
+                    }
+                    self.register_range(tcx, definition.did(), arguments)
+                        .map(OmType::Struct)
+                }
+                _ => Err(LowerError::program(format!(
+                    "mutable reference `{ty}` is not supported"
+                ))),
+            },
             _ => Err(LowerError::program(format!("type `{ty}` is not supported"))),
         }
     }
@@ -99,6 +112,15 @@ impl TypeRegistry {
         def_id: DefId,
         arguments: ty::GenericArgsRef<'tcx>,
     ) -> Result<TypeId, LowerError> {
+        if core_range_name(tcx, def_id).is_some() {
+            if !is_i32_range(arguments) {
+                return Err(LowerError::program(format!(
+                    "range `{}` is not supported; only `Range<i32>` is supported",
+                    tcx.def_path_str(def_id)
+                )));
+            }
+            return self.register_range(tcx, def_id, arguments);
+        }
         if !def_id.is_local() {
             return Err(LowerError::program(format!(
                 "external structure `{}` is not supported",
@@ -173,6 +195,54 @@ impl TypeRegistry {
         self.definitions[id.index() as usize] = Some(Nominal::Struct(OmStruct {
             id,
             name: tcx.def_path_str(def_id),
+            fields,
+        }));
+        Ok(id)
+    }
+
+    fn register_range<'tcx>(
+        &mut self,
+        tcx: TyCtxt<'tcx>,
+        def_id: DefId,
+        arguments: ty::GenericArgsRef<'tcx>,
+    ) -> Result<TypeId, LowerError> {
+        if let Some(id) = self.struct_ids.get(&def_id) {
+            return Ok(*id);
+        }
+
+        let definition = tcx.adt_def(def_id);
+        let variant = definition.non_enum_variant();
+        let index = u32::try_from(self.definitions.len())
+            .map_err(|_| LowerError::program("structure count exceeds OMIR limits"))?;
+        let id = TypeId::new(index);
+        self.struct_ids.insert(def_id, id);
+        self.definitions.push(None);
+
+        let mut fields = Vec::with_capacity(variant.fields.len());
+        for (field_index, field) in variant.fields.iter().enumerate() {
+            let field_id = FieldId::new(
+                u32::try_from(field_index)
+                    .map_err(|_| LowerError::program("field count exceeds OMIR limits"))?,
+            );
+            let field_ty = field.ty(tcx, arguments).skip_normalization();
+            let ty = self.lower_type(tcx, field_ty)?;
+            if ty == OmType::Unit {
+                return Err(LowerError::program(format!(
+                    "unit field `{}` in structure `{}` is not supported",
+                    field.name,
+                    tcx.def_path_str(def_id)
+                )));
+            }
+            fields.push(OmField {
+                id: field_id,
+                name: field.name.as_str().to_owned(),
+                ty,
+            });
+        }
+
+        self.definitions[id.index() as usize] = Some(Nominal::Struct(OmStruct {
+            id,
+            name: "Range<i32>".to_owned(),
             fields,
         }));
         Ok(id)
@@ -288,6 +358,17 @@ pub(super) fn normalize_core_enum_path(name: &str) -> String {
         .replace("std::option::Option", "Option")
         .replace("std::ops::ControlFlow", "ControlFlow")
         .replace("std::convert::Infallible", "Infallible")
+}
+
+pub(super) fn core_range_name(tcx: TyCtxt<'_>, def_id: DefId) -> Option<&'static str> {
+    match tcx.def_path_str(def_id).as_str() {
+        "std::ops::Range" => Some("Range"),
+        _ => None,
+    }
+}
+
+fn is_i32_range(arguments: ty::GenericArgsRef<'_>) -> bool {
+    arguments.len() == 1 && matches!(arguments.type_at(0).kind(), ty::Int(IntTy::I32))
 }
 
 fn core_enum_name(base: &'static str, arguments: ty::GenericArgsRef<'_>) -> String {

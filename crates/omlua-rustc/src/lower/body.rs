@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use omlua_ir::{
     AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FieldId, FunctionId, LocalId,
@@ -18,8 +18,8 @@ use rustc_span::def_id::DefId;
 use crate::LowerError;
 
 use super::program::FunctionRegistry;
-use super::try_helper::TryCall;
-use super::types::core_try_enum_name;
+use super::synthetic_helper::SyntheticCall;
+use super::types::{core_range_name, core_try_enum_name};
 
 pub(super) fn lower_function(
     tcx: TyCtxt<'_>,
@@ -51,6 +51,9 @@ struct BodyLowerer<'a, 'tcx> {
     registry: &'a mut FunctionRegistry,
     locals: Vec<OmLocal>,
     local_map: Vec<LocalMapping>,
+    range_aliases: HashMap<LocalId, LocalId>,
+    synthetic_blocks: Vec<OmBlock>,
+    next_synthetic_block: u32,
 }
 
 impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
@@ -109,6 +112,9 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
             }
         }
 
+        let next_synthetic_block = u32::try_from(body.basic_blocks.len())
+            .map_err(|_| LowerError::function(&name, "basic block count exceeds OMIR limits"))?;
+
         Ok(Self {
             tcx,
             body,
@@ -116,6 +122,9 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
             registry,
             locals,
             local_map,
+            range_aliases: HashMap::new(),
+            synthetic_blocks: Vec::new(),
+            next_synthetic_block,
         })
     }
 
@@ -130,6 +139,7 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         for (block, data) in self.body.basic_blocks.iter_enumerated() {
             blocks.push(self.lower_block(block, data)?);
         }
+        blocks.append(&mut self.synthetic_blocks);
 
         Ok(OmFunction {
             id,
@@ -152,10 +162,17 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                 statements.push(statement);
             }
         }
+        let terminator = match self.try_lower_range_next(block, &data.terminator().kind)? {
+            Some((extra, terminator)) => {
+                statements.extend(extra);
+                terminator
+            }
+            None => self.lower_terminator(block, &data.terminator().kind)?,
+        };
         Ok(OmBlock {
             id: block_id(block, &self.name)?,
             statements,
-            terminator: self.lower_terminator(block, &data.terminator().kind)?,
+            terminator,
         })
     }
 
@@ -167,6 +184,9 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         match kind {
             StatementKind::Assign(assignment) => {
                 let (place, value) = &**assignment;
+                if let Some(statement) = self.lower_mutable_range_borrow(block, place, value)? {
+                    return Ok(Some(statement));
+                }
                 if let Some(op) = checked_binary(value) {
                     let LocalMapping::CheckedPair {
                         value: destination,
@@ -572,6 +592,192 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         }
     }
 
+    fn lower_mutable_range_borrow(
+        &mut self,
+        block: BasicBlock,
+        place: &Place<'tcx>,
+        value: &MirRvalue<'tcx>,
+    ) -> Result<Option<Statement>, LowerError> {
+        let MirRvalue::Ref(_, borrow_kind, source) = value else {
+            return Ok(None);
+        };
+        if !matches!(borrow_kind, BorrowKind::Mut { .. }) {
+            return Ok(None);
+        }
+        let ty::Adt(definition, _) = source.ty(&self.body.local_decls, self.tcx).ty.kind() else {
+            return Ok(None);
+        };
+        if !core_range_name(self.tcx, definition.did()).is_some_and(|name| name == "Range") {
+            return Ok(None);
+        }
+        let LocalMapping::Scalar(destination) = self.local_map[place.local.index()] else {
+            return Err(self.block_error(
+                block,
+                "iterator borrow destination is not a scalar local",
+            ));
+        };
+        if !place.projection.is_empty() {
+            return Err(self.block_error(block, "iterator borrow destination has a projection"));
+        }
+        let source = self.lower_operand_place(block, source, false)?;
+        let (Operand::Copy(base) | Operand::Move(base)) = source else {
+            return Err(self.block_error(block, "iterator borrow source is not a local"));
+        };
+        self.range_aliases.insert(destination, base);
+        Ok(Some(Statement::Assign {
+            destination,
+            value: Rvalue::Use(Operand::Copy(base)),
+        }))
+    }
+
+    fn try_lower_range_next(
+        &mut self,
+        block: BasicBlock,
+        kind: &TerminatorKind<'tcx>,
+    ) -> Result<Option<(Vec<Statement>, Terminator)>, LowerError> {
+        let TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            target,
+            ..
+        } = kind
+        else {
+            return Ok(None);
+        };
+        let ty::FnDef(def_id, generic_args) = *func.ty(&self.body.local_decls, self.tcx).kind()
+        else {
+            return Ok(None);
+        };
+        if self.tcx.def_path_str(def_id) != "std::iter::Iterator::next" {
+            return Ok(None);
+        }
+        let ty::Adt(definition, _) = generic_args.type_at(0).kind() else {
+            return Ok(None);
+        };
+        if !core_range_name(self.tcx, definition.did()).is_some_and(|name| name == "Range") {
+            return Ok(None);
+        }
+        let Some(iterator) = args.first() else {
+            return Err(self.block_error(block, "iterator `next` call has no iterator argument"));
+        };
+        let (MirOperand::Copy(place) | MirOperand::Move(place)) = &iterator.node else {
+            return Err(self.block_error(block, "iterator `next` argument is not a local"));
+        };
+        let LocalMapping::Scalar(iterator_local) = self.local_map[place.local.index()] else {
+            return Err(self.block_error(block, "iterator `next` argument is not a scalar local"));
+        };
+        let Some(&base) = self.range_aliases.get(&iterator_local) else {
+            return Err(self.block_error(
+                block,
+                "iterator `next` call has no matching `&mut` borrow in the same block",
+            ));
+        };
+        let destination = self.lower_place(block, destination)?;
+        let target = target.ok_or_else(|| self.block_error(block, "diverging calls are not supported"))?;
+        let target = block_id(target, &self.name)?;
+        let OmType::Struct(range_id) = self.locals[base.index() as usize].ty else {
+            return Err(self.block_error(block, "iterator base is not a range structure"));
+        };
+        let OmType::Enum(option_id) = self.locals[destination.index() as usize].ty else {
+            return Err(self.block_error(block, "iterator `next` destination is not an option"));
+        };
+
+        let start = push_local(&mut self.locals, OmType::I32, LocalKind::Temporary, &self.name)?;
+        let end = push_local(&mut self.locals, OmType::I32, LocalKind::Temporary, &self.name)?;
+        let has_next = push_local(&mut self.locals, OmType::Bool, LocalKind::Temporary, &self.name)?;
+        let advanced = push_local(&mut self.locals, OmType::I32, LocalKind::Temporary, &self.name)?;
+
+        let statements = vec![
+            Statement::Assign {
+                destination: start,
+                value: Rvalue::Use(Operand::Project {
+                    base,
+                    path: vec![ProjectElem::Field(FieldId::new(0))],
+                    moved: false,
+                }),
+            },
+            Statement::Assign {
+                destination: end,
+                value: Rvalue::Use(Operand::Project {
+                    base,
+                    path: vec![ProjectElem::Field(FieldId::new(1))],
+                    moved: false,
+                }),
+            },
+            Statement::Assign {
+                destination: has_next,
+                value: Rvalue::Binary {
+                    op: BinaryOp::Lt,
+                    left: Operand::Copy(start),
+                    right: Operand::Copy(end),
+                },
+            },
+        ];
+
+        let none_block = self.push_synthetic_block(block, Vec::new(), Terminator::Goto { target })?;
+        let some_block = self.push_synthetic_block(
+            block,
+            vec![
+                Statement::Assign {
+                    destination: advanced,
+                    value: Rvalue::Binary {
+                        op: BinaryOp::Add,
+                        left: Operand::Copy(start),
+                        right: Operand::Constant(Constant::I32(1)),
+                    },
+                },
+                Statement::Assign {
+                    destination: base,
+                    value: Rvalue::Struct {
+                        ty: range_id,
+                        fields: vec![Operand::Copy(advanced), Operand::Copy(end)],
+                    },
+                },
+                Statement::Assign {
+                    destination,
+                    value: Rvalue::Variant {
+                        ty: option_id,
+                        variant: VariantId::new(1),
+                        fields: vec![Operand::Move(advanced)],
+                    },
+                },
+            ],
+            Terminator::Goto { target },
+        )?;
+        let unreachable_block =
+            self.push_synthetic_block(block, Vec::new(), Terminator::Unreachable)?;
+
+        let terminator = Terminator::SwitchInt {
+            discriminant: Operand::Move(has_next),
+            targets: vec![
+                (SwitchValue(0), none_block),
+                (SwitchValue(1), some_block),
+            ],
+            otherwise: unreachable_block,
+        };
+        Ok(Some((statements, terminator)))
+    }
+
+    fn push_synthetic_block(
+        &mut self,
+        source: BasicBlock,
+        statements: Vec<Statement>,
+        terminator: Terminator,
+    ) -> Result<BlockId, LowerError> {
+        let id = BlockId::new(self.next_synthetic_block);
+        self.next_synthetic_block = self
+            .next_synthetic_block
+            .checked_add(1)
+            .ok_or_else(|| self.block_error(source, "synthetic block ID overflow"))?;
+        self.synthetic_blocks.push(OmBlock {
+            id,
+            statements,
+            terminator,
+        });
+        Ok(id)
+    }
+
     fn lower_terminator(
         &mut self,
         block: BasicBlock,
@@ -605,11 +811,11 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                 let destination_ty = destination.ty(&self.body.local_decls, self.tcx).ty;
                 let target = target
                     .ok_or_else(|| self.block_error(block, "diverging calls are not supported"))?;
-                if let Some(try_call) =
-                    self.classify_try_call(block, def_id, generic_args, destination_ty)?
+                if let Some(synthetic_call) =
+                    self.classify_synthetic_call(block, def_id, generic_args, destination_ty)?
                 {
-                    let arguments = match try_call {
-                        TryCall::OptionFromResidual { .. } => Vec::new(),
+                    let arguments = match synthetic_call {
+                        SyntheticCall::OptionFromResidual { .. } => Vec::new(),
                         _ => args
                             .iter()
                             .map(|argument| self.lower_operand(block, &argument.node))
@@ -617,7 +823,7 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                     };
                     let callee = self
                         .registry
-                        .register_synthetic(self.tcx, try_call.name(), &try_call)
+                        .register_synthetic(self.tcx, synthetic_call.name(), &synthetic_call)
                         .map_err(|error| self.block_error(block, error.detail()))?;
                     return Ok(Terminator::Call {
                         callee,
@@ -699,19 +905,22 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         LowerError::block(&self.name, block.index() as u32, detail)
     }
 
-    fn classify_try_call(
+    fn classify_synthetic_call(
         &self,
         block: BasicBlock,
         def_id: DefId,
         generic_args: ty::GenericArgsRef<'tcx>,
         flow: Ty<'tcx>,
-    ) -> Result<Option<TryCall<'tcx>>, LowerError> {
+    ) -> Result<Option<SyntheticCall<'tcx>>, LowerError> {
         match self.tcx.def_path_str(def_id).as_str() {
             "std::ops::Try::branch" => self
                 .try_branch_call(block, generic_args.type_at(0), flow)
                 .map(Some),
             "std::ops::FromResidual::from_residual" => self
                 .try_from_residual_call(block, generic_args.type_at(0), generic_args.type_at(1))
+                .map(Some),
+            "std::iter::IntoIterator::into_iter" => self
+                .range_into_iter_call(block, generic_args.type_at(0))
                 .map(Some),
             _ => Ok(None),
         }
@@ -722,16 +931,16 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         block: BasicBlock,
         self_ty: Ty<'tcx>,
         flow: Ty<'tcx>,
-    ) -> Result<TryCall<'tcx>, LowerError> {
+    ) -> Result<SyntheticCall<'tcx>, LowerError> {
         let ty::Adt(definition, _) = self_ty.kind() else {
             return Err(self.unsupported_try(block, self_ty));
         };
         match core_try_enum_name(self.tcx, definition.did()) {
-            Some("Option") => Ok(TryCall::OptionBranch {
+            Some("Option") => Ok(SyntheticCall::OptionBranch {
                 option: self_ty,
                 flow,
             }),
-            Some("Result") => Ok(TryCall::ResultBranch {
+            Some("Result") => Ok(SyntheticCall::ResultBranch {
                 result: self_ty,
                 flow,
             }),
@@ -744,13 +953,13 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         block: BasicBlock,
         self_ty: Ty<'tcx>,
         residual: Ty<'tcx>,
-    ) -> Result<TryCall<'tcx>, LowerError> {
+    ) -> Result<SyntheticCall<'tcx>, LowerError> {
         let ty::Adt(definition, _) = self_ty.kind() else {
             return Err(self.unsupported_try(block, self_ty));
         };
         match core_try_enum_name(self.tcx, definition.did()) {
-            Some("Option") => Ok(TryCall::OptionFromResidual { option: self_ty }),
-            Some("Result") => Ok(TryCall::ResultFromResidual {
+            Some("Option") => Ok(SyntheticCall::OptionFromResidual { option: self_ty }),
+            Some("Result") => Ok(SyntheticCall::ResultFromResidual {
                 result: self_ty,
                 residual,
             }),
@@ -758,11 +967,34 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         }
     }
 
+    fn range_into_iter_call(
+        &self,
+        block: BasicBlock,
+        self_ty: Ty<'tcx>,
+    ) -> Result<SyntheticCall<'tcx>, LowerError> {
+        let ty::Adt(definition, _) = self_ty.kind() else {
+            return Err(self.unsupported_for(block, self_ty));
+        };
+        if !core_range_name(self.tcx, definition.did()).is_some_and(|name| name == "Range") {
+            return Err(self.unsupported_for(block, self_ty));
+        }
+        Ok(SyntheticCall::RangeIntoIter { range: self_ty })
+    }
+
     fn unsupported_try(&self, block: BasicBlock, self_ty: Ty<'tcx>) -> LowerError {
         self.block_error(
             block,
             format!(
                 "the `?` operator is not supported for `{self_ty}`; only `Option` and `Result` are supported"
+            ),
+        )
+    }
+
+    fn unsupported_for(&self, block: BasicBlock, self_ty: Ty<'tcx>) -> LowerError {
+        self.block_error(
+            block,
+            format!(
+                "the `for` loop is not supported for `{self_ty}`; only integer ranges `0..N` are supported"
             ),
         )
     }
