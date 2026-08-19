@@ -954,6 +954,191 @@ fn payload_variant(id: u32, name: &str, ty: OmType) -> OmVariant {
 }
 
 #[test]
+fn lowers_for_loop_range_structure_to_lir_switches() {
+    let range = TypeId::new(0);
+    let option = TypeId::new(1);
+    let program = OmProgram {
+        entry: FunctionId::new(0),
+        structs: vec![OmStruct {
+            id: range,
+            name: "Range<i32>".to_owned(),
+            fields: vec![
+                OmField {
+                    id: FieldId::new(0),
+                    name: "start".to_owned(),
+                    ty: OmType::I32,
+                },
+                OmField {
+                    id: FieldId::new(1),
+                    name: "end".to_owned(),
+                    ty: OmType::I32,
+                },
+            ],
+        }],
+        enums: vec![OmEnum {
+            id: option,
+            name: "Option<i32>".to_owned(),
+            variants: vec![
+                unit_variant(0, "None"),
+                payload_variant(1, "Some", OmType::I32),
+            ],
+        }],
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "__omlua_range_next<i32>".to_owned(),
+            return_type: OmType::Enum(option),
+            parameters: vec![LocalId::new(1)],
+            locals: vec![
+                om_local(0, OmType::Enum(option), LocalKind::Return),
+                om_local(1, OmType::Struct(range), LocalKind::Parameter),
+                om_local(2, OmType::I32, LocalKind::Temporary),
+                om_local(3, OmType::I32, LocalKind::Temporary),
+                om_local(4, OmType::Bool, LocalKind::Temporary),
+                om_local(5, OmType::I32, LocalKind::Temporary),
+            ],
+            blocks: vec![
+                OmBlock {
+                    id: BlockId::new(0),
+                    statements: vec![
+                        Statement::Assign {
+                            destination: LocalId::new(2),
+                            value: Rvalue::Use(Operand::Project {
+                                base: LocalId::new(1),
+                                path: vec![ProjectElem::Field(FieldId::new(0))],
+                                moved: false,
+                            }),
+                        },
+                        Statement::Assign {
+                            destination: LocalId::new(3),
+                            value: Rvalue::Use(Operand::Project {
+                                base: LocalId::new(1),
+                                path: vec![ProjectElem::Field(FieldId::new(1))],
+                                moved: false,
+                            }),
+                        },
+                        Statement::Assign {
+                            destination: LocalId::new(4),
+                            value: Rvalue::Binary {
+                                op: BinaryOp::Lt,
+                                left: Operand::Copy(LocalId::new(2)),
+                                right: Operand::Copy(LocalId::new(3)),
+                            },
+                        },
+                    ],
+                    terminator: Terminator::SwitchInt {
+                        discriminant: Operand::Move(LocalId::new(4)),
+                        targets: vec![
+                            (SwitchValue(0), BlockId::new(2)),
+                            (SwitchValue(1), BlockId::new(1)),
+                        ],
+                        otherwise: BlockId::new(3),
+                    },
+                },
+                OmBlock {
+                    id: BlockId::new(1),
+                    statements: vec![
+                        Statement::Assign {
+                            destination: LocalId::new(5),
+                            value: Rvalue::Binary {
+                                op: BinaryOp::Add,
+                                left: Operand::Copy(LocalId::new(2)),
+                                right: Operand::Constant(Constant::I32(1)),
+                            },
+                        },
+                        Statement::Assign {
+                            destination: LocalId::new(1),
+                            value: Rvalue::Struct {
+                                ty: range,
+                                fields: vec![
+                                    Operand::Copy(LocalId::new(5)),
+                                    Operand::Copy(LocalId::new(3)),
+                                ],
+                            },
+                        },
+                        Statement::Assign {
+                            destination: LocalId::new(0),
+                            value: Rvalue::Variant {
+                                ty: option,
+                                variant: VariantId::new(1),
+                                fields: vec![Operand::Move(LocalId::new(5))],
+                            },
+                        },
+                    ],
+                    terminator: Terminator::Return,
+                },
+                OmBlock {
+                    id: BlockId::new(2),
+                    statements: vec![Statement::Assign {
+                        destination: LocalId::new(0),
+                        value: Rvalue::Variant {
+                            ty: option,
+                            variant: VariantId::new(0),
+                            fields: vec![],
+                        },
+                    }],
+                    terminator: Terminator::Return,
+                },
+                OmBlock {
+                    id: BlockId::new(3),
+                    statements: vec![],
+                    terminator: Terminator::Unreachable,
+                },
+            ],
+        }],
+    };
+
+    let lir = lower_program(&program, &LuaBackendProfile::lua54()).unwrap();
+    let function = &lir.functions[0];
+    assert_eq!(
+        function.locals[1].kind,
+        LirValueKind::Table(vec![LirValueKind::Integer, LirValueKind::Integer])
+    );
+    assert_eq!(
+        function.locals[0].kind,
+        LirValueKind::Enum(vec![vec![], vec![LirValueKind::Integer]])
+    );
+    assert_eq!(
+        function.blocks[0].terminator,
+        LirTerminator::Branch {
+            condition: LirExpression::Value(LirValue::Local(LirLocalId::new(4))),
+            if_true: LirBlockId::new(1),
+            if_false: LirBlockId::new(2),
+        }
+    );
+    assert_eq!(
+        function.blocks[1].statements[2],
+        LirStatement::Assign {
+            destination: LirLocalId::new(0),
+            value: LirExpression::Enum {
+                shapes: vec![vec![], vec![LirValueKind::Integer]],
+                tag: 1,
+                fields: vec![LirExpression::Value(LirValue::Local(LirLocalId::new(5)))],
+            },
+        }
+    );
+    assert_eq!(
+        function.blocks[1].statements[1],
+        LirStatement::Assign {
+            destination: LirLocalId::new(1),
+            value: LirExpression::Table {
+                fields: vec![
+                    LirExpression::Value(LirValue::Local(LirLocalId::new(5))),
+                    LirExpression::Value(LirValue::Local(LirLocalId::new(3))),
+                ],
+            },
+        }
+    );
+}
+
+fn unit_variant(id: u32, name: &str) -> OmVariant {
+    OmVariant {
+        id: VariantId::new(id),
+        name: name.to_owned(),
+        fields: vec![],
+    }
+}
+
+#[test]
 fn rejects_malformed_enum_programs() {
     let mut unknown_variant = enum_base();
     match &mut unknown_variant.functions[0].blocks[0].statements[0] {

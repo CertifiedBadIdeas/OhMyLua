@@ -582,6 +582,35 @@ fn lowers_for_loops_over_integer_ranges() {
 }
 
 #[test]
+fn builds_and_executes_the_exact_for_range_artifact() {
+    let project = project_directory("for-range");
+    let output = build(&project, &lua54_fixture("for_range.rs"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read(artifact(&project)).unwrap(),
+        fs::read(lua54_expected("for_range.lua")).unwrap()
+    );
+
+    let execution = Command::new("lua")
+        .arg(artifact(&project))
+        .output()
+        .expect("Lua 5.4.8 is required on PATH");
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(execution.stdout.is_empty());
+    assert!(execution.stderr.is_empty());
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
 fn rejects_external_enums_outside_the_try_whitelist_without_partial_output() {
     let external = compile("unsupported_external_enum.rs");
     assert!(!external.status.success());
