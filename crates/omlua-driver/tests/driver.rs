@@ -498,6 +498,18 @@ fn lowers_question_mark_operator_to_synthetic_try_helpers() {
 }
 
 #[test]
+fn rejects_external_enums_outside_the_try_whitelist_without_partial_output() {
+    let external = compile("unsupported_external_enum.rs");
+    assert!(!external.status.success());
+    assert!(external.stdout.is_empty());
+    assert!(
+        String::from_utf8(external.stderr)
+            .unwrap()
+            .contains("external enum `std::cmp::Ordering` is not supported")
+    );
+}
+
+#[test]
 fn rejects_enum_references_and_ref_mut_bindings_without_partial_output() {
     let enum_ref = compile("unsupported_enum_ref.rs");
     assert!(!enum_ref.status.success());
