@@ -5,6 +5,7 @@ members = [
     "crates/omlua-ir",
     "crates/omlua-lua-ir",
     "crates/omlua-lua-backend",
+    "crates/omlua-codegen",
     "crates/omlua-rustc",
 ]
 resolver = "3"

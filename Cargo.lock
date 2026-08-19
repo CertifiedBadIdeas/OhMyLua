@@ -7,6 +7,15 @@ name = "omlua"
 version = "0.1.0"
 
 [[package]]
+name = "omlua-codegen"
+version = "0.1.0"
+dependencies = [
+ "omlua-ir",
+ "omlua-lua-backend",
+ "omlua-lua-ir",
+]
+
+[[package]]
 name = "omlua-driver"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,13 @@
+[package]
+name = "omlua-codegen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+omlua-lua-backend = { path = "../omlua-lua-backend" }
+omlua-lua-ir = { path = "../omlua-lua-ir" }
+
+[dev-dependencies]
+omlua-ir = { path = "../omlua-ir" }
+
