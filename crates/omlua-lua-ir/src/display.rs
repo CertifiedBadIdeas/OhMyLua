@@ -56,6 +56,15 @@ impl fmt::Display for LirValueKind {
                 write_joined(formatter, fields, |formatter, field| field.fmt(formatter))?;
                 formatter.write_str(">")
             }
+            Self::Enum(shapes) => {
+                formatter.write_str("enum<")?;
+                write_joined(formatter, shapes, |formatter, shape| {
+                    formatter.write_str("[")?;
+                    write_joined(formatter, shape, |formatter, field| field.fmt(formatter))?;
+                    formatter.write_str("]")
+                })?;
+                formatter.write_str(">")
+            }
         }
     }
 }
@@ -81,7 +90,9 @@ impl fmt::Display for LirExpression {
                 })?;
                 formatter.write_str(")")
             }
-            Self::Table { fields } => {
+            Self::Table {
+                fields,
+            } => {
                 formatter.write_str("table {")?;
                 write_joined(formatter, fields, |formatter, field| field.fmt(formatter))?;
                 formatter.write_str("}")
@@ -91,6 +102,18 @@ impl fmt::Display for LirExpression {
                 index,
                 result,
             } => write!(formatter, "table_get {table}[{index}] -> {result}"),
+            Self::Enum { tag, fields, .. } => {
+                write!(formatter, "enum #{tag} {{")?;
+                write_joined(formatter, fields, |formatter, field| field.fmt(formatter))?;
+                formatter.write_str("}")
+            }
+            Self::EnumTag { value } => write!(formatter, "enum_tag {value}"),
+            Self::EnumField {
+                value,
+                variant,
+                field,
+                result,
+            } => write!(formatter, "enum_field {value}#{variant}.{field} -> {result}"),
         }
     }
 }
@@ -270,5 +293,122 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn formats_enums_deterministically() {
+        assert_eq!(
+            enum_program().to_string(),
+            concat!(
+                "lir entry @0 requirements(integer_bits=64, label_jumps=true)\n",
+                "\n",
+                "fn @0(%1) -> %0 {\n",
+                "  locals:\n",
+                "    %0: integer\n",
+                "    %1: enum<[integer], [integer, integer]> parameter\n",
+                "    %2: integer\n",
+                "    %3: enum<[integer], [integer, integer]>\n",
+                "  bb0:\n",
+                "    %3 = enum #1 {20, 22}\n",
+                "    %2 = enum_tag %3\n",
+                "    %0 = enum_field %3#1.0 -> integer\n",
+                "    return %0\n",
+                "}\n",
+            )
+        );
+    }
+
+    fn enum_program() -> LirProgram {
+        let shapes = vec![
+            vec![LirValueKind::Integer],
+            vec![LirValueKind::Integer, LirValueKind::Integer],
+        ];
+        let return_local = LirLocalId::new(0);
+        let parameter = LirLocalId::new(1);
+        let tag_local = LirLocalId::new(2);
+        let value_local = LirLocalId::new(3);
+        LirProgram {
+            entry: LirFunctionId::new(0),
+            requirements: BackendRequirements {
+                minimum_integer_bits: 64,
+                label_jumps: true,
+                native_bitwise: false,
+            },
+            helpers: Vec::new(),
+            functions: vec![LirFunction {
+                id: LirFunctionId::new(0),
+                entry: LirBlockId::new(0),
+                parameters: vec![parameter],
+                return_local: Some(return_local),
+                locals: vec![
+                    LirLocal {
+                        id: return_local,
+                        kind: LirValueKind::Integer,
+                        parameter: false,
+                    },
+                    LirLocal {
+                        id: parameter,
+                        kind: LirValueKind::Enum(shapes.clone()),
+                        parameter: true,
+                    },
+                    LirLocal {
+                        id: tag_local,
+                        kind: LirValueKind::Integer,
+                        parameter: false,
+                    },
+                    LirLocal {
+                        id: value_local,
+                        kind: LirValueKind::Enum(shapes),
+                        parameter: false,
+                    },
+                ],
+                blocks: vec![LirBlock {
+                    id: LirBlockId::new(0),
+                    statements: vec![
+                        LirStatement::Assign {
+                            destination: value_local,
+                            value: LirExpression::Enum {
+                                shapes: enum_shapes(),
+                                tag: 1,
+                                fields: vec![integer_expression(20), integer_expression(22)],
+                            },
+                        },
+                        LirStatement::Assign {
+                            destination: tag_local,
+                            value: LirExpression::EnumTag {
+                                value: Box::new(local_expression(value_local)),
+                            },
+                        },
+                        LirStatement::Assign {
+                            destination: return_local,
+                            value: LirExpression::EnumField {
+                                value: Box::new(local_expression(value_local)),
+                                variant: 1,
+                                field: 0,
+                                result: LirValueKind::Integer,
+                            },
+                        },
+                    ],
+                    terminator: LirTerminator::Return {
+                        value: Some(local_expression(return_local)),
+                    },
+                }],
+            }],
+        }
+    }
+
+    fn enum_shapes() -> Vec<Vec<LirValueKind>> {
+        vec![
+            vec![LirValueKind::Integer],
+            vec![LirValueKind::Integer, LirValueKind::Integer],
+        ]
+    }
+
+    fn local_expression(id: LirLocalId) -> LirExpression {
+        LirExpression::Value(LirValue::Local(id))
+    }
+
+    fn integer_expression(value: i64) -> LirExpression {
+        LirExpression::Value(LirValue::Integer(value))
     }
 }

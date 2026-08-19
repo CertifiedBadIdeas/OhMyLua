@@ -43,6 +43,7 @@ pub enum LirValueKind {
     Bool,
     Integer,
     Table(Vec<LirValueKind>),
+    Enum(Vec<Vec<LirValueKind>>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +83,20 @@ pub enum LirExpression {
     TableGet {
         table: Box<LirExpression>,
         index: u32,
+        result: LirValueKind,
+    },
+    Enum {
+        shapes: Vec<Vec<LirValueKind>>,
+        tag: u32,
+        fields: Vec<LirExpression>,
+    },
+    EnumTag {
+        value: Box<LirExpression>,
+    },
+    EnumField {
+        value: Box<LirExpression>,
+        variant: u32,
+        field: u32,
         result: LirValueKind,
     },
 }

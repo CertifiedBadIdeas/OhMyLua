@@ -217,6 +217,140 @@ fn table_program(index: u32) -> LirProgram {
 }
 
 #[test]
+fn emits_and_validates_enums() {
+    let program = enum_program(1, 1);
+    let source = emit_lua54(&program, &LuaBackendProfile::lua54()).unwrap();
+    assert!(source.contains("v0 = {1, 20, 22}"));
+    assert!(source.contains("v1 = v0[1]"));
+    assert!(source.contains("v2 = v0[3]"));
+
+    let error = emit_lua54(&enum_program(9, 0), &LuaBackendProfile::lua54()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "error[OMLUA0003]: function f0, block bb0 constructs an enum with tag 9 outside its shape table"
+    );
+
+    let mut non_enum_tag = enum_program(1, 0);
+    let LirStatement::Assign { value, .. } = &mut non_enum_tag.functions[0].blocks[0].statements[1];
+    let LirExpression::EnumTag { value: base } = value else {
+        unreachable!()
+    };
+    **base = integer(7);
+    assert_eq!(
+        emit_lua54(&non_enum_tag, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0003]: function f0, block bb0 reads the tag of a non-enum value"
+    );
+
+    let mut missing_variant = enum_program(1, 0);
+    let LirStatement::Assign { value, .. } = &mut missing_variant.functions[0].blocks[0].statements[2];
+    let LirExpression::EnumField { variant, .. } = value else {
+        unreachable!()
+    };
+    *variant = 5;
+    assert_eq!(
+        emit_lua54(&missing_variant, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0003]: function f0, block bb0 reads variant 5 outside the enum shape table"
+    );
+
+    let mut beyond_shape = enum_program(1, 0);
+    let LirStatement::Assign { value, .. } = &mut beyond_shape.functions[0].blocks[0].statements[2];
+    let LirExpression::EnumField { field, .. } = value else {
+        unreachable!()
+    };
+    *field = 2;
+    assert_eq!(
+        emit_lua54(&beyond_shape, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0003]: function f0, block bb0 reads field 2 beyond the variant shape"
+    );
+
+    let mut wrong_result = enum_program(1, 0);
+    let LirStatement::Assign { value, .. } = &mut wrong_result.functions[0].blocks[0].statements[2];
+    let LirExpression::EnumField { result, .. } = value else {
+        unreachable!()
+    };
+    *result = LirValueKind::Bool;
+    assert_eq!(
+        emit_lua54(&wrong_result, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0003]: function f0, block bb0 declares the wrong result type for enum field 0"
+    );
+}
+
+#[test]
+fn reference_lua54_executes_enum_construction_tag_and_field_reads() {
+    assert_success(&enum_program(1, 1), "22\n");
+    assert_success(&enum_program(0, 0), "20\n");
+}
+
+fn enum_program(tag: u32, field: u32) -> LirProgram {
+    let shapes = vec![
+        vec![LirValueKind::Integer],
+        vec![LirValueKind::Integer, LirValueKind::Integer],
+    ];
+    let value_local = local_definition(0, LirValueKind::Enum(shapes.clone()), false);
+    let tag_local = local_definition(1, LirValueKind::Integer, false);
+    let field_local = local_definition(2, LirValueKind::Integer, false);
+    LirProgram {
+        entry: LirFunctionId::new(0),
+        requirements: BackendRequirements {
+            minimum_integer_bits: 64,
+            label_jumps: true,
+            native_bitwise: false,
+        },
+        helpers: vec![],
+        functions: vec![LirFunction {
+            id: LirFunctionId::new(0),
+            entry: LirBlockId::new(0),
+            parameters: vec![],
+            return_local: Some(local_id(2)),
+            locals: vec![value_local, tag_local, field_local],
+            blocks: vec![LirBlock {
+                id: LirBlockId::new(0),
+                statements: vec![
+                    assign(
+                        0,
+                        LirExpression::Enum {
+                            shapes,
+                            tag,
+                            fields: if tag == 0 {
+                                vec![integer(20)]
+                            } else {
+                                vec![integer(20), integer(22)]
+                            },
+                        },
+                    ),
+                    assign(
+                        1,
+                        LirExpression::EnumTag {
+                            value: Box::new(local(0)),
+                        },
+                    ),
+                    assign(
+                        2,
+                        LirExpression::EnumField {
+                            value: Box::new(local(0)),
+                            variant: 1,
+                            field,
+                            result: LirValueKind::Integer,
+                        },
+                    ),
+                ],
+                terminator: LirTerminator::Return {
+                    value: Some(local(2)),
+                },
+            }],
+        }],
+    }
+}
+
+#[test]
 fn reference_lua54_executes_hand_built_omir_through_the_whole_backend() {
     assert_omir_success(&binary_omir(BinaryOp::Div, -7, 3), "-2\n");
     assert_omir_success(&binary_omir(BinaryOp::Rem, -7, 3), "-1\n");

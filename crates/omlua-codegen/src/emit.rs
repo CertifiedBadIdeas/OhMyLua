@@ -242,17 +242,39 @@ fn emit_expression(output: &mut String, expression: &LirExpression) {
             output.push('}');
         }
         LirExpression::TableGet { table, index, .. } => {
-            match table.as_ref() {
-                LirExpression::Value(LirValue::Local(_)) | LirExpression::TableGet { .. } => {
-                    emit_expression(output, table)
-                }
-                _ => {
-                    output.push('(');
-                    emit_expression(output, table);
-                    output.push(')');
-                }
-            }
+            emit_indexable_base(output, table);
             write!(output, "[{index}]").unwrap();
+        }
+        LirExpression::Enum { tag, fields, .. } => {
+            output.push('{');
+            emit_integer(output, i64::from(*tag));
+            for field in fields {
+                output.push_str(", ");
+                emit_expression(output, field);
+            }
+            output.push('}');
+        }
+        LirExpression::EnumTag { value } => {
+            emit_indexable_base(output, value);
+            output.push_str("[1]");
+        }
+        LirExpression::EnumField { value, field, .. } => {
+            emit_indexable_base(output, value);
+            write!(output, "[{}]", field + 2).unwrap();
+        }
+    }
+}
+
+fn emit_indexable_base(output: &mut String, value: &LirExpression) {
+    match value {
+        LirExpression::Value(LirValue::Local(_))
+        | LirExpression::TableGet { .. }
+        | LirExpression::EnumTag { .. }
+        | LirExpression::EnumField { .. } => emit_expression(output, value),
+        _ => {
+            output.push('(');
+            emit_expression(output, value);
+            output.push(')');
         }
     }
 }

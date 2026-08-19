@@ -419,6 +419,59 @@ fn expression_kind(
             }
             Ok(result.clone())
         }
+        LirExpression::Enum { shapes, tag, fields } => {
+            let Some(shape) = shapes.get(*tag as usize) else {
+                return Err(error(format!(
+                    "{context} constructs an enum with tag {tag} outside its shape table"
+                )));
+            };
+            if fields.len() != shape.len() {
+                return Err(error(format!(
+                    "{context} constructs an enum variant with the wrong field count"
+                )));
+            }
+            for (field, expected) in fields.iter().zip(shape) {
+                let actual = expression_kind(field, locals, helpers, used_helpers, context)?;
+                require_kind(expected.clone(), actual, context, "enum field")?;
+            }
+            Ok(LirValueKind::Enum(shapes.clone()))
+        }
+        LirExpression::EnumTag { value } => {
+            let actual = expression_kind(value, locals, helpers, used_helpers, context)?;
+            if !matches!(actual, LirValueKind::Enum(_)) {
+                return Err(error(format!("{context} reads the tag of a non-enum value")));
+            }
+            Ok(LirValueKind::Integer)
+        }
+        LirExpression::EnumField {
+            value,
+            variant,
+            field,
+            result,
+        } => {
+            let actual = expression_kind(value, locals, helpers, used_helpers, context)?;
+            let LirValueKind::Enum(shapes) = actual else {
+                return Err(error(format!(
+                    "{context} reads an enum field of a non-enum value"
+                )));
+            };
+            let Some(shape) = shapes.get(*variant as usize) else {
+                return Err(error(format!(
+                    "{context} reads variant {variant} outside the enum shape table"
+                )));
+            };
+            let Some(actual_result) = shape.get(*field as usize) else {
+                return Err(error(format!(
+                    "{context} reads field {field} beyond the variant shape"
+                )));
+            };
+            if actual_result != result {
+                return Err(error(format!(
+                    "{context} declares the wrong result type for enum field {field}"
+                )));
+            }
+            Ok(result.clone())
+        }
     }
 }
 
