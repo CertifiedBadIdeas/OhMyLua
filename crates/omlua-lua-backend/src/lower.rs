@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use omlua_ir::{
     AssertKind, BinaryOp, CheckedBinaryOp, Constant, OmFunction, OmProgram, OmStruct, OmType,
-    Operand, Rvalue, Statement, Terminator, TypeId, UnaryOp, UnwindAction,
+    Operand, ProjectElem, Rvalue, Statement, Terminator, TypeId, UnaryOp, UnwindAction,
 };
 use omlua_lua_ir::{
     BackendRequirements, LirBinaryOp, LirBlock, LirBlockId, LirExpression, LirFunction,
@@ -229,6 +229,10 @@ impl<'a> FunctionLowerer<'a> {
                     .collect::<Result<_, _>>()?,
             }),
             Rvalue::SharedBorrow { source } => self.lower_operand(block, source),
+            Rvalue::Variant { .. } | Rvalue::Discriminant { .. } => Err(self.block_error(
+                block,
+                "enum operations are not supported by backend `lua54` yet",
+            )),
         }
     }
 
@@ -240,48 +244,53 @@ impl<'a> FunctionLowerer<'a> {
                 }
                 Ok(local(local_id.index()))
             }
-            Operand::Project {
-                base,
-                deref,
-                fields,
-                ..
-            } => {
-                if fields.is_empty() && !deref {
+            Operand::Project { base, path, .. } => {
+                if path.is_empty() {
                     return Err(self.block_error(block, "field projection is empty"));
                 }
                 let mut value = local(base.index());
                 let mut ty = self.local_type(base.index())?;
-                if *deref {
-                    let OmType::SharedRef(id) = ty else {
-                        return Err(self.block_error(
-                            block,
-                            "dereference source is not a shared structure reference",
-                        ));
-                    };
-                    ty = OmType::Struct(id);
-                }
-                for field_id in fields {
-                    let struct_id = match ty {
-                        OmType::Struct(id) => id,
-                        _ => {
+                for element in path {
+                    match element {
+                        ProjectElem::Deref => {
+                            let OmType::SharedRef(id) = ty else {
+                                return Err(self.block_error(
+                                    block,
+                                    "dereference source is not a shared structure reference",
+                                ));
+                            };
+                            ty = OmType::Struct(id);
+                        }
+                        ProjectElem::Downcast(_) => {
                             return Err(self.block_error(
                                 block,
-                                "field projection starts from a non-struct value",
+                                "enum downcasts are not supported by backend `lua54` yet",
                             ));
                         }
-                    };
-                    let field = self.field(struct_id, field_id.index(), block)?;
-                    let result = lower_type(field.ty, self.structs)?.ok_or_else(|| {
-                        self.block_error(block, "unit structure fields are not supported")
-                    })?;
-                    value = LirExpression::TableGet {
-                        table: Box::new(value),
-                        index: field_id.index().checked_add(1).ok_or_else(|| {
-                            self.block_error(block, "Lua table field index overflow")
-                        })?,
-                        result,
-                    };
-                    ty = field.ty;
+                        ProjectElem::Field(field_id) => {
+                            let struct_id = match ty {
+                                OmType::Struct(id) => id,
+                                _ => {
+                                    return Err(self.block_error(
+                                        block,
+                                        "field projection starts from a non-struct value",
+                                    ));
+                                }
+                            };
+                            let field = self.field(struct_id, field_id.index(), block)?;
+                            let result = lower_type(field.ty, self.structs)?.ok_or_else(|| {
+                                self.block_error(block, "unit structure fields are not supported")
+                            })?;
+                            value = LirExpression::TableGet {
+                                table: Box::new(value),
+                                index: field_id.index().checked_add(1).ok_or_else(|| {
+                                    self.block_error(block, "Lua table field index overflow")
+                                })?,
+                                result,
+                            };
+                            ty = field.ty;
+                        }
+                    }
                 }
                 Ok(value)
             }
@@ -462,39 +471,44 @@ impl<'a> FunctionLowerer<'a> {
     fn operand_type(&self, operand: &Operand) -> Result<OmType, LowerError> {
         match operand {
             Operand::Copy(local) | Operand::Move(local) => self.local_type(local.index()),
-            Operand::Project {
-                base,
-                deref,
-                fields,
-                ..
-            } => {
-                if fields.is_empty() && !deref {
+            Operand::Project { base, path, .. } => {
+                if path.is_empty() {
                     return Err(LowerError::function(
                         &self.function.name,
                         "field projection is empty",
                     ));
                 }
                 let mut ty = self.local_type(base.index())?;
-                if *deref {
-                    let OmType::SharedRef(id) = ty else {
-                        return Err(LowerError::function(
-                            &self.function.name,
-                            "dereference source is not a shared structure reference",
-                        ));
-                    };
-                    ty = OmType::Struct(id);
-                }
-                for field_id in fields {
-                    let struct_id = match ty {
-                        OmType::Struct(id) => id,
-                        _ => {
+                for element in path {
+                    match element {
+                        ProjectElem::Deref => {
+                            let OmType::SharedRef(id) = ty else {
+                                return Err(LowerError::function(
+                                    &self.function.name,
+                                    "dereference source is not a shared structure reference",
+                                ));
+                            };
+                            ty = OmType::Struct(id);
+                        }
+                        ProjectElem::Downcast(_) => {
                             return Err(LowerError::function(
                                 &self.function.name,
-                                "field projection crosses a non-struct value",
+                                "enum downcasts are not supported by backend `lua54` yet",
                             ));
                         }
-                    };
-                    ty = self.field_for_function(struct_id, field_id.index())?.ty;
+                        ProjectElem::Field(field_id) => {
+                            let struct_id = match ty {
+                                OmType::Struct(id) => id,
+                                _ => {
+                                    return Err(LowerError::function(
+                                        &self.function.name,
+                                        "field projection crosses a non-struct value",
+                                    ));
+                                }
+                            };
+                            ty = self.field_for_function(struct_id, field_id.index())?.ty;
+                        }
+                    }
                 }
                 Ok(ty)
             }
@@ -553,6 +567,10 @@ impl<'a> FunctionLowerer<'a> {
                 OmType::Struct(id) => Ok(OmType::SharedRef(id)),
                 _ => Err(self.block_error(block, "shared borrow source is not an owned structure")),
             },
+            Rvalue::Variant { .. } | Rvalue::Discriminant { .. } => Err(self.block_error(
+                block,
+                "enum operations are not supported by backend `lua54` yet",
+            )),
         }
     }
 
@@ -608,6 +626,9 @@ fn lower_type(
         OmType::Unit => Ok(None),
         OmType::Bool => Ok(Some(LirValueKind::Bool)),
         OmType::I32 => Ok(Some(LirValueKind::Integer)),
+        OmType::Enum(_) => Err(LowerError::program(
+            "enum values are not supported by backend `lua54` yet",
+        )),
         OmType::Struct(id) | OmType::SharedRef(id) => {
             let definition = structs.get(&id).ok_or_else(|| {
                 LowerError::program(format!("structure type @{id} does not exist"))

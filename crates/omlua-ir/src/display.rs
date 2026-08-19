@@ -277,9 +277,15 @@ fn format_operand_without_mode(operand: &Operand) -> String {
 
 fn format_projected_place(base: crate::LocalId, path: &[ProjectElem]) -> String {
     let mut place = format!("%{base}");
-    for element in path {
+    for (index, element) in path.iter().enumerate() {
         match element {
-            ProjectElem::Deref => place = format!("(*{place})"),
+            ProjectElem::Deref => {
+                if index + 1 < path.len() {
+                    place = format!("(*{place})");
+                } else {
+                    place = format!("*{place}");
+                }
+            }
             ProjectElem::Downcast(variant) => {
                 write!(place, "#{variant}").expect("writing to a String cannot fail");
             }

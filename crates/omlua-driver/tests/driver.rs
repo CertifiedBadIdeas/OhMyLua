@@ -405,6 +405,52 @@ fn driver_produced_lua_executes_with_the_documented_interpreter() {
     fs::remove_dir_all(project).unwrap();
 }
 
+#[test]
+fn lowers_enums_variants_and_match_to_omir() {
+    let output = compile("enum_match.rs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+
+    let omir = String::from_utf8(output.stdout).unwrap();
+    assert!(omir.contains("enum @0 Command {"));
+    assert!(omir.contains("  v0 Stop\n"));
+    assert!(omir.contains("  v1 Pause\n"));
+    assert!(omir.contains("  v2 GoTo {\n"));
+    assert!(omir.contains("  v3 SetThrottle {\n"));
+    assert!(omir.contains("variant @0#2 { 20_i32, 22_i32 }"));
+    assert!(omir.contains("discriminant "));
+    assert!(omir.contains("copy %1#2.0"));
+    assert!(omir.contains("copy %1#2.1"));
+    assert!(omir.contains("copy %1#3.0"));
+}
+
+#[test]
+fn rejects_enum_references_and_ref_mut_bindings_without_partial_output() {
+    let enum_ref = compile("unsupported_enum_ref.rs");
+    assert!(!enum_ref.status.success());
+    assert!(enum_ref.stdout.is_empty());
+    assert!(
+        String::from_utf8(enum_ref.stderr)
+            .unwrap()
+            .contains(
+                "shared reference `&Command` is not supported; only references to named structures are supported"
+            )
+    );
+
+    let ref_mut = compile("unsupported_ref_mut.rs");
+    assert!(!ref_mut.status.success());
+    assert!(ref_mut.stdout.is_empty());
+    assert!(
+        String::from_utf8(ref_mut.stderr)
+            .unwrap()
+            .contains("mutable reference `&mut i32` is not supported")
+    );
+}
+
 fn expected_omir() -> &'static str {
     concat!(
         "program entry @0\n",

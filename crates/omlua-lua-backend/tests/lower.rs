@@ -1,7 +1,7 @@
 use omlua_ir::{
     AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FieldId, FunctionId, LocalId,
-    LocalKind, OmBlock, OmField, OmFunction, OmLocal, OmProgram, OmStruct, OmType, Operand, Rvalue,
-    Statement, SwitchValue, Terminator, TypeId, UnwindAction,
+    LocalKind, OmBlock, OmField, OmFunction, OmLocal, OmProgram, OmStruct, OmType, Operand,
+    ProjectElem, Rvalue, Statement, SwitchValue, Terminator, TypeId, UnwindAction,
 };
 use omlua_lua_backend::{LuaBackendProfile, LuaDialect, lower_program};
 use omlua_lua_ir::{
@@ -41,6 +41,7 @@ fn lowers_structs_and_shared_references_to_packed_tables() {
                 },
             ],
         }],
+        enums: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "main".to_owned(),
@@ -75,8 +76,7 @@ fn lowers_structs_and_shared_references_to_packed_tables() {
                         destination: LocalId::new(3),
                         value: Rvalue::Use(Operand::Project {
                             base: LocalId::new(2),
-                            deref: true,
-                            fields: vec![FieldId::new(1)],
+                            path: vec![ProjectElem::Deref, ProjectElem::Field(FieldId::new(1))],
                             moved: false,
                         }),
                     },
@@ -203,6 +203,7 @@ fn lowers_boolean_switches_to_boolean_branches() {
     let program = OmProgram {
         entry: FunctionId::new(0),
         structs: vec![],
+        enums: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "choose".to_owned(),
@@ -252,6 +253,7 @@ fn decodes_signed_i32_switch_values_from_their_rustc_bits() {
     let program = OmProgram {
         entry: FunctionId::new(0),
         structs: vec![],
+        enums: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "choose".to_owned(),
@@ -300,6 +302,7 @@ fn division_program() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
         structs: vec![],
+        enums: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "calculate".to_owned(),
@@ -346,6 +349,7 @@ fn cleanup_unwind_program() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
         structs: vec![],
+        enums: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "main".to_owned(),
@@ -371,6 +375,7 @@ fn checked_add_program() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
         structs: vec![],
+        enums: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "main".to_owned(),

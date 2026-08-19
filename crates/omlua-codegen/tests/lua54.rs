@@ -233,6 +233,7 @@ fn binary_omir(op: BinaryOp, left: i32, right: i32) -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
         structs: vec![],
+        enums: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "calculate".to_owned(),
@@ -261,6 +262,7 @@ fn checked_add_omir(left: i32, right: i32) -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
         structs: vec![],
+        enums: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "checked_add".to_owned(),
@@ -310,6 +312,7 @@ fn signed_switch_omir() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
         structs: vec![],
+        enums: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "signed_switch".to_owned(),
@@ -343,6 +346,7 @@ fn call_omir() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
         structs: vec![],
+        enums: vec![],
         functions: vec![
             OmFunction {
                 id: FunctionId::new(0),

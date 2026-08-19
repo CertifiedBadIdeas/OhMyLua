@@ -24,10 +24,11 @@ pub(crate) fn lower_program(tcx: TyCtxt<'_>) -> Result<OmProgram, LowerError> {
         functions.push(lower_function(tcx, def_id, id, &mut registry)?);
     }
 
-    let structs = registry.types.finish()?;
+    let (structs, enums) = registry.types.finish()?;
     Ok(OmProgram {
         entry,
         structs,
+        enums,
         functions,
     })
 }

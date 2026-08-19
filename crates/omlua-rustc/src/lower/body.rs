@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use omlua_ir::{
     AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FieldId, FunctionId, LocalId,
-    LocalKind, OmBlock, OmFunction, OmLocal, OmType, Operand, Rvalue, Statement, SwitchValue,
-    Terminator, UnaryOp, UnwindAction,
+    LocalKind, OmBlock, OmFunction, OmLocal, OmType, Operand, ProjectElem, Rvalue, Statement,
+    SwitchValue, Terminator, TypeId, UnaryOp, UnwindAction, VariantId,
 };
 use rustc_index::Idx;
 use rustc_middle::mir::{
@@ -59,6 +59,7 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         registry: &'a mut FunctionRegistry,
     ) -> Result<Self, LowerError> {
         let checked_locals = find_checked_locals(body);
+        let discriminant_locals = find_discriminant_locals(body);
         let mut locals = Vec::new();
         let mut local_map = Vec::with_capacity(body.local_decls.len());
 
@@ -71,6 +72,19 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                 let overflow =
                     push_local(&mut locals, OmType::Bool, LocalKind::CheckedOverflow, &name)?;
                 local_map.push(LocalMapping::CheckedPair { value, overflow });
+            } else if discriminant_locals.contains(&local) {
+                if !matches!(declaration.ty.kind(), ty::Int(_)) {
+                    return Err(LowerError::function(
+                        &name,
+                        format!(
+                            "local _{}: discriminant type `{}` is not supported",
+                            local.index(),
+                            declaration.ty
+                        ),
+                    ));
+                }
+                let id = push_local(&mut locals, OmType::I32, LocalKind::Discriminant, &name)?;
+                local_map.push(LocalMapping::Scalar(id));
             } else {
                 let ty = registry
                     .types
@@ -195,6 +209,9 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
     ) -> Result<Rvalue, LowerError> {
         match value {
             MirRvalue::Use(operand, _) => Ok(Rvalue::Use(self.lower_operand(block, operand)?)),
+            MirRvalue::Discriminant(place) => Ok(Rvalue::Discriminant {
+                source: self.lower_operand_place(block, place, false)?,
+            }),
             MirRvalue::UnaryOp(op, operand) => Ok(Rvalue::Unary {
                 op: lower_unary(*op).ok_or_else(|| {
                     self.block_error(block, format!("unary operation `{op:?}` is not supported"))
@@ -217,9 +234,7 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                 let AggregateKind::Adt(def_id, variant, _, _, _) = kind.as_ref() else {
                     return Err(self.block_error(block, "non-structure aggregate is not supported"));
                 };
-                if variant.as_usize() != 0 {
-                    return Err(self.block_error(block, "enum aggregates are not supported"));
-                }
+                let definition = self.tcx.adt_def(*def_id);
                 let ty = self.registry.types.type_id(*def_id).ok_or_else(|| {
                     self.block_error(
                         block,
@@ -229,13 +244,22 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                         ),
                     )
                 })?;
-                Ok(Rvalue::Struct {
-                    ty,
-                    fields: operands
-                        .iter()
-                        .map(|operand| self.lower_operand(block, operand))
-                        .collect::<Result<_, _>>()?,
-                })
+                let fields = operands
+                    .iter()
+                    .map(|operand| self.lower_operand(block, operand))
+                    .collect::<Result<_, _>>()?;
+                if definition.is_enum() {
+                    Ok(Rvalue::Variant {
+                        ty,
+                        variant: VariantId::new(variant.as_u32()),
+                        fields,
+                    })
+                } else {
+                    if variant.as_usize() != 0 {
+                        return Err(self.block_error(block, "non-structure aggregate is not supported"));
+                    }
+                    Ok(Rvalue::Struct { ty, fields })
+                }
             }
             MirRvalue::Ref(_, borrow_kind, place) => {
                 if !matches!(borrow_kind, BorrowKind::Shared) {
@@ -325,8 +349,8 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         }
 
         let mut ty = self.locals[base.index() as usize].ty;
-        let mut fields = Vec::new();
-        let mut deref = false;
+        let mut path = Vec::new();
+        let mut downcast: Option<VariantId> = None;
         for projection in place.projection.as_ref() {
             match projection {
                 PlaceElem::Deref => {
@@ -336,33 +360,41 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                             "dereference of a non-shared-structure reference is not supported",
                         ));
                     };
-                    if deref || !fields.is_empty() {
-                        return Err(self.block_error(block, "nested dereference is not supported"));
-                    }
-                    deref = true;
                     ty = OmType::Struct(id);
+                    path.push(ProjectElem::Deref);
+                }
+                PlaceElem::Downcast(_name, variant) => {
+                    if downcast.is_some() {
+                        return Err(self.block_error(block, "nested downcast without a field read"));
+                    }
+                    let OmType::Enum(type_id) = ty else {
+                        return Err(self.block_error(block, "downcast of a non-enum value"));
+                    };
+                    self.validate_variant(block, type_id, VariantId::new(variant.as_u32()))?;
+                    downcast = Some(VariantId::new(variant.as_u32()));
+                    path.push(ProjectElem::Downcast(VariantId::new(variant.as_u32())));
                 }
                 PlaceElem::Field(field, _) => {
-                    let OmType::Struct(type_id) = ty else {
-                        return Err(
-                            self.block_error(block, "field access on a non-structure value")
-                        );
-                    };
-                    let definition = self.registry.types.definition(type_id).ok_or_else(|| {
-                        self.block_error(block, format!("structure type @{type_id} is incomplete"))
-                    })?;
-                    let definition_field =
-                        definition.fields.get(field.as_usize()).ok_or_else(|| {
-                            self.block_error(
+                    let definition_field = match (ty, downcast) {
+                        (OmType::Struct(type_id), None) => {
+                            self.struct_field(block, type_id, field.as_usize())?
+                        }
+                        (OmType::Enum(type_id), Some(variant)) => {
+                            self.variant_field(block, type_id, variant, field.as_usize())?
+                        }
+                        (OmType::Enum(_), None) => {
+                            return Err(self.block_error(
                                 block,
-                                format!(
-                                    "field .{} does not exist in structure @{type_id}",
-                                    field.as_usize()
-                                ),
-                            )
-                        })?;
-                    fields.push(FieldId::new(field.as_u32()));
+                                "enum field access requires a variant downcast",
+                            ));
+                        }
+                        _ => {
+                            return Err(self.block_error(block, "field access on a non-structure value"));
+                        }
+                    };
+                    path.push(ProjectElem::Field(FieldId::new(field.as_u32())));
                     ty = definition_field.ty;
+                    downcast = None;
                 }
                 other => {
                     return Err(self.block_error(
@@ -372,20 +404,10 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                 }
             }
         }
-        if fields.is_empty() && !deref {
-            Ok(if moved {
-                Operand::Move(base)
-            } else {
-                Operand::Copy(base)
-            })
-        } else {
-            Ok(Operand::Project {
-                base,
-                deref,
-                fields,
-                moved,
-            })
+        if downcast.is_some() {
+            return Err(self.block_error(block, "enum downcast without a field read"));
         }
+        Ok(Operand::Project { base, path, moved })
     }
 
     fn lower_shared_borrow_source(
@@ -405,45 +427,84 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
             Operand::Copy(local) | Operand::Move(local) => {
                 Ok(self.locals[local.index() as usize].ty)
             }
-            Operand::Project {
-                base,
-                deref,
-                fields,
-                ..
-            } => {
+            Operand::Project { base, path, .. } => {
                 let mut ty = self.locals[base.index() as usize].ty;
-                if *deref {
-                    let OmType::SharedRef(id) = ty else {
-                        return Err(LowerError::function(
-                            &self.name,
-                            "dereference source is not a shared structure reference",
-                        ));
-                    };
-                    ty = OmType::Struct(id);
-                }
-                for field in fields {
-                    let type_id = match ty {
-                        OmType::Struct(id) | OmType::SharedRef(id) => id,
-                        _ => {
-                            return Err(LowerError::function(
-                                &self.name,
-                                "field projection crosses a non-structure value",
-                            ));
+                let mut downcast: Option<VariantId> = None;
+                for element in path {
+                    match element {
+                        ProjectElem::Deref => {
+                            let OmType::SharedRef(id) = ty else {
+                                return Err(LowerError::function(
+                                    &self.name,
+                                    "dereference source is not a shared structure reference",
+                                ));
+                            };
+                            ty = OmType::Struct(id);
                         }
-                    };
-                    ty = self
-                        .registry
-                        .types
-                        .definition(type_id)
-                        .and_then(|definition| definition.fields.get(field.index() as usize))
-                        .filter(|definition| definition.id == *field)
-                        .ok_or_else(|| {
-                            LowerError::function(
-                                &self.name,
-                                format!("field .{field} does not exist in structure @{type_id}"),
-                            )
-                        })?
-                        .ty;
+                        ProjectElem::Downcast(variant) => {
+                            let OmType::Enum(_) = ty else {
+                                return Err(LowerError::function(
+                                    &self.name,
+                                    "downcast crosses a non-enum value",
+                                ));
+                            };
+                            downcast = Some(*variant);
+                        }
+                        ProjectElem::Field(field) => {
+                            let definition_field = match (ty, downcast) {
+                                (OmType::Struct(type_id), None) => self
+                                    .registry
+                                    .types
+                                    .definition(type_id)
+                                    .and_then(|definition| definition.fields.get(field.index() as usize))
+                                    .filter(|definition| definition.id == *field)
+                                    .ok_or_else(|| {
+                                        LowerError::function(
+                                            &self.name,
+                                            format!(
+                                                "field .{field} does not exist in structure @{type_id}"
+                                            ),
+                                        )
+                                    })?,
+                                (OmType::Enum(type_id), Some(variant)) => self
+                                    .registry
+                                    .types
+                                    .enum_definition(type_id)
+                                    .and_then(|definition| definition.variants.get(variant.index() as usize))
+                                    .filter(|definition| definition.id == variant)
+                                    .and_then(|variant| variant.fields.get(field.index() as usize))
+                                    .filter(|definition| definition.id == *field)
+                                    .ok_or_else(|| {
+                                        LowerError::function(
+                                            &self.name,
+                                            format!(
+                                                "field .{field} does not exist in variant v{variant} of enum @{type_id}"
+                                            ),
+                                        )
+                                    })?,
+                                (OmType::Enum(_), None) => {
+                                    return Err(LowerError::function(
+                                        &self.name,
+                                        "enum field access requires a variant downcast",
+                                    ));
+                                }
+                                _ => {
+                                    return Err(LowerError::function(
+                                        &self.name,
+                                        "field projection crosses a non-structure value",
+                                    ));
+                                }
+                            };
+                            ty = definition_field.ty;
+                            downcast = None;
+                        }
+                    }
+                }
+                if downcast.is_some() {
+                    return Err(LowerError::function(
+                        &self.name,
+                        "projection ends with a downcast without a field read",
+                    ));
                 }
                 Ok(ty)
             }
@@ -603,6 +664,81 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
     fn block_error(&self, block: BasicBlock, detail: impl Into<String>) -> LowerError {
         LowerError::block(&self.name, block.index() as u32, detail)
     }
+
+    fn struct_field(
+        &self,
+        block: BasicBlock,
+        type_id: TypeId,
+        field_index: usize,
+    ) -> Result<&omlua_ir::OmField, LowerError> {
+        self.registry
+            .types
+            .definition(type_id)
+            .ok_or_else(|| {
+                self.block_error(block, format!("structure type @{type_id} is incomplete"))
+            })?
+            .fields
+            .get(field_index)
+            .filter(|field| field.id.index() == field_index as u32)
+            .ok_or_else(|| {
+                self.block_error(
+                    block,
+                    format!("field .{field_index} does not exist in structure @{type_id}"),
+                )
+            })
+    }
+
+    fn validate_variant(
+        &self,
+        block: BasicBlock,
+        type_id: TypeId,
+        variant: VariantId,
+    ) -> Result<(), LowerError> {
+        let definition = self.registry.types.enum_definition(type_id).ok_or_else(|| {
+            self.block_error(block, format!("enum type @{type_id} is incomplete"))
+        })?;
+        if definition.variants.get(variant.index() as usize).is_some_and(|v| v.id == variant) {
+            Ok(())
+        } else {
+            Err(self.block_error(
+                block,
+                format!("variant v{variant} does not exist in enum @{type_id}"),
+            ))
+        }
+    }
+
+    fn variant_field(
+        &self,
+        block: BasicBlock,
+        type_id: TypeId,
+        variant: VariantId,
+        field_index: usize,
+    ) -> Result<&omlua_ir::OmField, LowerError> {
+        let definition = self.registry.types.enum_definition(type_id).ok_or_else(|| {
+            self.block_error(block, format!("enum type @{type_id} is incomplete"))
+        })?;
+        definition
+            .variants
+            .get(variant.index() as usize)
+            .filter(|v| v.id == variant)
+            .ok_or_else(|| {
+                self.block_error(
+                    block,
+                    format!("variant v{variant} does not exist in enum @{type_id}"),
+                )
+            })?
+            .fields
+            .get(field_index)
+            .filter(|field| field.id.index() == field_index as u32)
+            .ok_or_else(|| {
+                self.block_error(
+                    block,
+                    format!(
+                        "field .{field_index} does not exist in variant v{variant} of enum @{type_id}"
+                    ),
+                )
+            })
+    }
 }
 
 fn find_checked_locals(body: &Body<'_>) -> HashSet<Local> {
@@ -615,6 +751,21 @@ fn find_checked_locals(body: &Body<'_>) -> HashSet<Local> {
             };
             let (place, value) = &**assignment;
             (place.projection.is_empty() && checked_binary(value).is_some()).then_some(place.local)
+        })
+        .collect()
+}
+
+fn find_discriminant_locals(body: &Body<'_>) -> HashSet<Local> {
+    body.basic_blocks
+        .iter()
+        .flat_map(|block| &block.statements)
+        .filter_map(|statement| {
+            let StatementKind::Assign(assignment) = &statement.kind else {
+                return None;
+            };
+            let (place, value) = &**assignment;
+            (place.projection.is_empty() && matches!(value, MirRvalue::Discriminant(_)))
+                .then_some(place.local)
         })
         .collect()
 }

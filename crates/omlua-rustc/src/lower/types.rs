@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use omlua_ir::{FieldId, OmField, OmStruct, OmType, TypeId};
+use omlua_ir::{FieldId, OmEnum, OmField, OmStruct, OmType, OmVariant, TypeId, VariantId};
 use rustc_hir::Mutability;
 use rustc_middle::ty::{self, IntTy, Ty, TyCtxt};
 use rustc_span::def_id::DefId;
@@ -10,6 +10,7 @@ use crate::LowerError;
 pub(super) struct TypeRegistry {
     ids: HashMap<DefId, TypeId>,
     definitions: Vec<Option<OmStruct>>,
+    enum_definitions: Vec<Option<OmEnum>>,
 }
 
 impl TypeRegistry {
@@ -17,6 +18,7 @@ impl TypeRegistry {
         Self {
             ids: HashMap::new(),
             definitions: Vec::new(),
+            enum_definitions: Vec::new(),
         }
     }
 
@@ -32,6 +34,9 @@ impl TypeRegistry {
             ty::Adt(definition, arguments) if definition.is_struct() => self
                 .register_struct(tcx, definition.did(), arguments)
                 .map(OmType::Struct),
+            ty::Adt(definition, arguments) if definition.is_enum() => self
+                .register_enum(tcx, definition.did(), arguments)
+                .map(OmType::Enum),
             ty::Ref(_, inner, Mutability::Not) => {
                 let ty::Adt(definition, arguments) = inner.kind() else {
                     return Err(LowerError::program(format!(
@@ -63,8 +68,15 @@ impl TypeRegistry {
             .and_then(Option::as_ref)
     }
 
-    pub(super) fn finish(self) -> Result<Vec<OmStruct>, LowerError> {
-        self.definitions
+    pub(super) fn enum_definition(&self, id: TypeId) -> Option<&OmEnum> {
+        self.enum_definitions
+            .get(id.index() as usize)
+            .and_then(Option::as_ref)
+    }
+
+    pub(super) fn finish(self) -> Result<(Vec<OmStruct>, Vec<OmEnum>), LowerError> {
+        let structs = self
+            .definitions
             .into_iter()
             .enumerate()
             .map(|(index, definition)| {
@@ -74,7 +86,18 @@ impl TypeRegistry {
                     ))
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        let enums = self
+            .enum_definitions
+            .into_iter()
+            .enumerate()
+            .map(|(index, definition)| {
+                definition.ok_or_else(|| {
+                    LowerError::program(format!("enum type @{index} was not completely defined"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((structs, enums))
     }
 
     fn register_struct<'tcx>(
@@ -158,6 +181,93 @@ impl TypeRegistry {
             id,
             name: tcx.def_path_str(def_id),
             fields,
+        });
+        Ok(id)
+    }
+
+    fn register_enum<'tcx>(
+        &mut self,
+        tcx: TyCtxt<'tcx>,
+        def_id: DefId,
+        arguments: ty::GenericArgsRef<'tcx>,
+    ) -> Result<TypeId, LowerError> {
+        if !def_id.is_local() {
+            return Err(LowerError::program(format!(
+                "external enum `{}` is not supported",
+                tcx.def_path_str(def_id)
+            )));
+        }
+        if !arguments.is_empty() || tcx.generics_of(def_id).count() != 0 {
+            return Err(LowerError::program(format!(
+                "generic enum `{}` is not supported",
+                tcx.def_path_str(def_id)
+            )));
+        }
+        if let Some(id) = self.ids.get(&def_id) {
+            return Ok(*id);
+        }
+
+        let definition = tcx.adt_def(def_id);
+        if definition.has_dtor(tcx) {
+            return Err(LowerError::program(format!(
+                "enum `{}` with a destructor is not supported",
+                tcx.def_path_str(def_id)
+            )));
+        }
+
+        let index = u32::try_from(self.enum_definitions.len())
+            .map_err(|_| LowerError::program("enum count exceeds OMIR limits"))?;
+        let id = TypeId::new(index);
+        self.ids.insert(def_id, id);
+        self.enum_definitions.push(None);
+
+        let mut variants = Vec::with_capacity(definition.variants().len());
+        for (variant_index, variant) in definition.variants().iter_enumerated() {
+            let variant_id = VariantId::new(
+                u32::try_from(variant_index)
+                    .map_err(|_| LowerError::program("variant count exceeds OMIR limits"))?,
+            );
+            let mut fields = Vec::with_capacity(variant.fields.len());
+            for (field_index, field) in variant.fields.iter().enumerate() {
+                let field_id = FieldId::new(
+                    u32::try_from(field_index)
+                        .map_err(|_| LowerError::program("field count exceeds OMIR limits"))?,
+                );
+                let field_ty = field.ty(tcx, arguments).skip_normalization();
+                if matches!(field_ty.kind(), ty::Ref(..)) {
+                    return Err(LowerError::program(format!(
+                        "reference field `{}` in variant `{}` of enum `{}` is not supported",
+                        field.name,
+                        variant.name,
+                        tcx.def_path_str(def_id)
+                    )));
+                }
+                let ty = self.lower_type(tcx, field_ty)?;
+                if ty == OmType::Unit {
+                    return Err(LowerError::program(format!(
+                        "unit field `{}` in variant `{}` of enum `{}` is not supported",
+                        field.name,
+                        variant.name,
+                        tcx.def_path_str(def_id)
+                    )));
+                }
+                fields.push(OmField {
+                    id: field_id,
+                    name: field.name.as_str().to_owned(),
+                    ty,
+                });
+            }
+            variants.push(OmVariant {
+                id: variant_id,
+                name: variant.name.as_str().to_owned(),
+                fields,
+            });
+        }
+
+        self.enum_definitions[id.index() as usize] = Some(OmEnum {
+            id,
+            name: tcx.def_path_str(def_id),
+            variants,
         });
         Ok(id)
     }
