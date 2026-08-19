@@ -19,6 +19,14 @@ name = "omlua-ir"
 version = "0.1.0"
 
 [[package]]
+name = "omlua-lua-backend"
+version = "0.1.0"
+dependencies = [
+ "omlua-ir",
+ "omlua-lua-ir",
+]
+
+[[package]]
 name = "omlua-lua-ir"
 version = "0.1.0"
 

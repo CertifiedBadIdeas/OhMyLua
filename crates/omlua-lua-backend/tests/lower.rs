@@ -1,0 +1,277 @@
+use omlua_ir::{
+    AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FunctionId, LocalId, LocalKind,
+    OmBlock, OmFunction, OmLocal, OmProgram, OmType, Operand, Rvalue, Statement, Terminator,
+    UnwindAction,
+};
+use omlua_lua_backend::{LuaBackendProfile, LuaDialect, lower_program};
+use omlua_lua_ir::{
+    BackendRequirements, LirBinaryOp, LirBlock, LirBlockId, LirExpression, LirFunction,
+    LirFunctionId, LirLocal, LirLocalId, LirProgram, LirStatement, LirTerminator, LirValue,
+    LirValueKind, RuntimeHelper,
+};
+
+#[test]
+fn lua54_profile_records_the_reference_runtime_model() {
+    let profile = LuaBackendProfile::lua54();
+    assert_eq!(profile.dialect(), LuaDialect::Lua54);
+    assert_eq!(profile.numeric().integer_bits, 64);
+    assert_eq!(profile.numeric().float_bits, 64);
+    assert!(profile.control_flow().label_jumps);
+    assert!(profile.operators().native_bitwise);
+}
+
+#[test]
+fn lowers_checked_add_and_assert_to_explicit_lir() {
+    let actual = lower_program(&checked_add_program(), &LuaBackendProfile::lua54()).unwrap();
+    assert_eq!(actual, expected_checked_add_lir());
+}
+
+#[test]
+fn requests_division_and_remainder_helpers_in_dependency_order() {
+    let program = lower_program(&division_program(), &LuaBackendProfile::lua54()).unwrap();
+    assert_eq!(
+        program.helpers,
+        vec![RuntimeHelper::I32DivTrunc, RuntimeHelper::I32Rem]
+    );
+
+    let statements = &program.functions[0].blocks[0].statements;
+    assert!(matches!(
+        &statements[0],
+        LirStatement::Assign {
+            value: LirExpression::RuntimeCall {
+                helper: RuntimeHelper::I32DivTrunc,
+                ..
+            },
+            ..
+        }
+    ));
+    assert!(matches!(
+        &statements[1],
+        LirStatement::Assign {
+            value: LirExpression::RuntimeCall {
+                helper: RuntimeHelper::I32Rem,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn rejects_cleanup_unwind_edges_with_context() {
+    let error = lower_program(&cleanup_unwind_program(), &LuaBackendProfile::lua54()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        concat!(
+            "error[OMLUA0002]: cleanup unwind edges are not supported by backend `lua54`\n",
+            "  in function `main`, basic block bb0",
+        )
+    );
+}
+
+fn division_program() -> OmProgram {
+    OmProgram {
+        entry: FunctionId::new(0),
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "calculate".to_owned(),
+            return_type: OmType::I32,
+            parameters: vec![LocalId::new(1), LocalId::new(2)],
+            locals: vec![
+                om_local(0, OmType::I32, LocalKind::Return),
+                om_local(1, OmType::I32, LocalKind::Parameter),
+                om_local(2, OmType::I32, LocalKind::Parameter),
+                om_local(3, OmType::I32, LocalKind::Temporary),
+                om_local(4, OmType::I32, LocalKind::Temporary),
+            ],
+            blocks: vec![OmBlock {
+                id: BlockId::new(0),
+                statements: vec![
+                    Statement::Assign {
+                        destination: LocalId::new(3),
+                        value: Rvalue::Binary {
+                            op: BinaryOp::Div,
+                            left: Operand::Copy(LocalId::new(1)),
+                            right: Operand::Copy(LocalId::new(2)),
+                        },
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(4),
+                        value: Rvalue::Binary {
+                            op: BinaryOp::Rem,
+                            left: Operand::Copy(LocalId::new(1)),
+                            right: Operand::Copy(LocalId::new(2)),
+                        },
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(0),
+                        value: Rvalue::Use(Operand::Move(LocalId::new(4))),
+                    },
+                ],
+                terminator: Terminator::Return,
+            }],
+        }],
+    }
+}
+
+fn cleanup_unwind_program() -> OmProgram {
+    OmProgram {
+        entry: FunctionId::new(0),
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "main".to_owned(),
+            return_type: OmType::Unit,
+            parameters: Vec::new(),
+            locals: vec![om_local(0, OmType::Unit, LocalKind::Return)],
+            blocks: vec![OmBlock {
+                id: BlockId::new(0),
+                statements: Vec::new(),
+                terminator: Terminator::Call {
+                    callee: FunctionId::new(1),
+                    arguments: Vec::new(),
+                    destination: LocalId::new(0),
+                    target: BlockId::new(0),
+                    unwind: UnwindAction::Cleanup(BlockId::new(1)),
+                },
+            }],
+        }],
+    }
+}
+
+fn checked_add_program() -> OmProgram {
+    OmProgram {
+        entry: FunctionId::new(0),
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "main".to_owned(),
+            return_type: OmType::I32,
+            parameters: vec![LocalId::new(1)],
+            locals: vec![
+                om_local(0, OmType::I32, LocalKind::Return),
+                om_local(1, OmType::I32, LocalKind::Parameter),
+                om_local(2, OmType::I32, LocalKind::CheckedValue),
+                om_local(3, OmType::Bool, LocalKind::CheckedOverflow),
+            ],
+            blocks: vec![
+                OmBlock {
+                    id: BlockId::new(0),
+                    statements: vec![Statement::CheckedBinary {
+                        value: LocalId::new(2),
+                        overflow: LocalId::new(3),
+                        op: CheckedBinaryOp::Add,
+                        left: Operand::Copy(LocalId::new(1)),
+                        right: Operand::Constant(Constant::I32(1)),
+                    }],
+                    terminator: Terminator::Assert {
+                        condition: Operand::Move(LocalId::new(3)),
+                        expected: false,
+                        kind: AssertKind::Overflow {
+                            op: BinaryOp::Add,
+                            left: Operand::Copy(LocalId::new(1)),
+                            right: Operand::Constant(Constant::I32(1)),
+                        },
+                        target: BlockId::new(1),
+                        unwind: UnwindAction::Continue,
+                    },
+                },
+                OmBlock {
+                    id: BlockId::new(1),
+                    statements: vec![Statement::Assign {
+                        destination: LocalId::new(0),
+                        value: Rvalue::Use(Operand::Move(LocalId::new(2))),
+                    }],
+                    terminator: Terminator::Return,
+                },
+            ],
+        }],
+    }
+}
+
+fn om_local(index: u32, ty: OmType, kind: LocalKind) -> OmLocal {
+    OmLocal {
+        id: LocalId::new(index),
+        ty,
+        kind,
+    }
+}
+
+fn expected_checked_add_lir() -> LirProgram {
+    let local = |index| LirExpression::Value(LirValue::Local(LirLocalId::new(index)));
+    let integer = |value| LirExpression::Value(LirValue::Integer(value));
+    let binary = |op, left, right| LirExpression::Binary {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+    };
+
+    LirProgram {
+        entry: LirFunctionId::new(0),
+        requirements: BackendRequirements {
+            minimum_integer_bits: 64,
+            label_jumps: true,
+            native_bitwise: false,
+        },
+        helpers: Vec::new(),
+        functions: vec![LirFunction {
+            id: LirFunctionId::new(0),
+            entry: LirBlockId::new(0),
+            parameters: vec![LirLocalId::new(1)],
+            return_local: Some(LirLocalId::new(0)),
+            locals: vec![
+                lir_local(0, LirValueKind::Integer, false),
+                lir_local(1, LirValueKind::Integer, true),
+                lir_local(2, LirValueKind::Integer, false),
+                lir_local(3, LirValueKind::Bool, false),
+            ],
+            blocks: vec![
+                LirBlock {
+                    id: LirBlockId::new(0),
+                    statements: vec![
+                        LirStatement::Assign {
+                            destination: LirLocalId::new(2),
+                            value: binary(LirBinaryOp::Add, local(1), integer(1)),
+                        },
+                        LirStatement::Assign {
+                            destination: LirLocalId::new(3),
+                            value: binary(
+                                LirBinaryOp::Or,
+                                binary(LirBinaryOp::Lt, local(2), integer(i32::MIN.into())),
+                                binary(LirBinaryOp::Gt, local(2), integer(i32::MAX.into())),
+                            ),
+                        },
+                    ],
+                    terminator: LirTerminator::Branch {
+                        condition: local(3),
+                        if_true: LirBlockId::new(2),
+                        if_false: LirBlockId::new(1),
+                    },
+                },
+                LirBlock {
+                    id: LirBlockId::new(1),
+                    statements: vec![LirStatement::Assign {
+                        destination: LirLocalId::new(0),
+                        value: local(2),
+                    }],
+                    terminator: LirTerminator::Return {
+                        value: Some(local(0)),
+                    },
+                },
+                LirBlock {
+                    id: LirBlockId::new(2),
+                    statements: Vec::new(),
+                    terminator: LirTerminator::Raise {
+                        message: "attempt to add with overflow".to_owned(),
+                    },
+                },
+            ],
+        }],
+    }
+}
+
+fn lir_local(index: u32, kind: LirValueKind, parameter: bool) -> LirLocal {
+    LirLocal {
+        id: LirLocalId::new(index),
+        kind,
+        parameter,
+    }
+}

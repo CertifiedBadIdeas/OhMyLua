@@ -4,6 +4,7 @@ members = [
     "crates/omlua-driver",
     "crates/omlua-ir",
     "crates/omlua-lua-ir",
+    "crates/omlua-lua-backend",
     "crates/omlua-rustc",
 ]
 resolver = "3"

@@ -1,0 +1,12 @@
+[package]
+name = "omlua-lua-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+omlua-ir = { path = "../omlua-ir" }
+omlua-lua-ir = { path = "../omlua-lua-ir" }
