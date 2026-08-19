@@ -19,6 +19,10 @@ name = "omlua-ir"
 version = "0.1.0"
 
 [[package]]
+name = "omlua-lua-ir"
+version = "0.1.0"
+
+[[package]]
 name = "omlua-rustc"
 version = "0.1.0"
 dependencies = [

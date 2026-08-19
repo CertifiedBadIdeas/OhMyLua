@@ -3,6 +3,7 @@ members = [
     "crates/omlua",
     "crates/omlua-driver",
     "crates/omlua-ir",
+    "crates/omlua-lua-ir",
     "crates/omlua-rustc",
 ]
 resolver = "3"
