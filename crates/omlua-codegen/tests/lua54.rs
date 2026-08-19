@@ -1,8 +1,9 @@
 use omlua_codegen::emit_lua54;
 use omlua_ir::{
-    AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FunctionId, LocalId, LocalKind,
-    OmBlock, OmFunction, OmLocal, OmProgram, OmType, Operand, Rvalue, Statement, SwitchValue,
-    Terminator, UnwindAction,
+    AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FieldId, FunctionId, LocalId,
+    LocalKind, OmBlock, OmEnum, OmField, OmFunction, OmLocal, OmProgram, OmType, OmVariant,
+    Operand, ProjectElem, Rvalue, Statement, SwitchValue, Terminator, TypeId, UnwindAction,
+    VariantId,
 };
 use omlua_lua_backend::{LuaBackendProfile, lower_program};
 use omlua_lua_ir::{
@@ -288,6 +289,240 @@ fn emits_and_validates_enums() {
 fn reference_lua54_executes_enum_construction_tag_and_field_reads() {
     assert_success(&enum_program(1, 1), "22\n");
     assert_success(&enum_program(0, 0), "20\n");
+}
+
+#[test]
+fn reference_lua54_executes_the_monomorphized_result_branch_shape() {
+    assert_omir_success(&result_branch_omir(), "20\n");
+}
+
+fn result_branch_omir() -> OmProgram {
+    let result = TypeId::new(0);
+    let residual = TypeId::new(1);
+    let infallible = TypeId::new(2);
+    let flow = TypeId::new(3);
+    OmProgram {
+        entry: FunctionId::new(0),
+        structs: vec![],
+        enums: vec![
+            OmEnum {
+                id: result,
+                name: "Result<i32, i32>".to_owned(),
+                variants: vec![
+                    result_variant(0, "Ok", OmType::I32),
+                    result_variant(1, "Err", OmType::I32),
+                ],
+            },
+            OmEnum {
+                id: residual,
+                name: "Result<Infallible, i32>".to_owned(),
+                variants: vec![
+                    result_variant(0, "Ok", OmType::Enum(infallible)),
+                    result_variant(1, "Err", OmType::I32),
+                ],
+            },
+            OmEnum {
+                id: infallible,
+                name: "Infallible".to_owned(),
+                variants: vec![],
+            },
+            OmEnum {
+                id: flow,
+                name: "ControlFlow<Result<Infallible, i32>, i32>".to_owned(),
+                variants: vec![
+                    result_variant(0, "Continue", OmType::I32),
+                    result_variant(1, "Break", OmType::Enum(residual)),
+                ],
+            },
+        ],
+        functions: vec![
+            OmFunction {
+                id: FunctionId::new(0),
+                name: "main".to_owned(),
+                return_type: OmType::I32,
+                parameters: vec![],
+                locals: vec![
+                    om_local(0, OmType::I32, LocalKind::Return),
+                    om_local(1, OmType::Enum(result), LocalKind::Temporary),
+                    om_local(2, OmType::Enum(flow), LocalKind::Temporary),
+                    om_local(3, OmType::I32, LocalKind::Discriminant),
+                    om_local(4, OmType::I32, LocalKind::Temporary),
+                ],
+                blocks: vec![
+                    OmBlock {
+                        id: BlockId::new(0),
+                        statements: vec![Statement::Assign {
+                            destination: LocalId::new(1),
+                            value: Rvalue::Variant {
+                                ty: result,
+                                variant: VariantId::new(0),
+                                fields: vec![Operand::Constant(Constant::I32(20))],
+                            },
+                        }],
+                        terminator: Terminator::Call {
+                            callee: FunctionId::new(1),
+                            arguments: vec![Operand::Move(LocalId::new(1))],
+                            destination: LocalId::new(2),
+                            target: BlockId::new(1),
+                            unwind: UnwindAction::Continue,
+                        },
+                    },
+                    OmBlock {
+                        id: BlockId::new(1),
+                        statements: vec![Statement::Assign {
+                            destination: LocalId::new(3),
+                            value: Rvalue::Discriminant {
+                                source: Operand::Copy(LocalId::new(2)),
+                            },
+                        }],
+                        terminator: Terminator::SwitchInt {
+                            discriminant: Operand::Move(LocalId::new(3)),
+                            targets: vec![
+                                (SwitchValue(0), BlockId::new(2)),
+                                (SwitchValue(1), BlockId::new(3)),
+                            ],
+                            otherwise: BlockId::new(4),
+                        },
+                    },
+                    OmBlock {
+                        id: BlockId::new(2),
+                        statements: vec![
+                            Statement::Assign {
+                                destination: LocalId::new(4),
+                                value: Rvalue::Use(Operand::Project {
+                                    base: LocalId::new(2),
+                                    path: vec![
+                                        ProjectElem::Downcast(VariantId::new(0)),
+                                        ProjectElem::Field(FieldId::new(0)),
+                                    ],
+                                    moved: false,
+                                }),
+                            },
+                            Statement::Assign {
+                                destination: LocalId::new(0),
+                                value: Rvalue::Use(Operand::Copy(LocalId::new(4))),
+                            },
+                        ],
+                        terminator: Terminator::Return,
+                    },
+                    returning_block(3, 0),
+                    OmBlock {
+                        id: BlockId::new(4),
+                        statements: vec![],
+                        terminator: Terminator::Unreachable,
+                    },
+                ],
+            },
+            OmFunction {
+                id: FunctionId::new(1),
+                name: "__omlua_result_branch<i32, i32>".to_owned(),
+                return_type: OmType::Enum(flow),
+                parameters: vec![LocalId::new(1)],
+                locals: vec![
+                    om_local(0, OmType::Enum(flow), LocalKind::Return),
+                    om_local(1, OmType::Enum(result), LocalKind::Parameter),
+                    om_local(2, OmType::I32, LocalKind::Discriminant),
+                    om_local(3, OmType::Enum(flow), LocalKind::Temporary),
+                    om_local(4, OmType::Enum(residual), LocalKind::Temporary),
+                    om_local(5, OmType::Enum(flow), LocalKind::Temporary),
+                ],
+                blocks: vec![
+                    OmBlock {
+                        id: BlockId::new(0),
+                        statements: vec![Statement::Assign {
+                            destination: LocalId::new(2),
+                            value: Rvalue::Discriminant {
+                                source: Operand::Copy(LocalId::new(1)),
+                            },
+                        }],
+                        terminator: Terminator::SwitchInt {
+                            discriminant: Operand::Move(LocalId::new(2)),
+                            targets: vec![
+                                (SwitchValue(0), BlockId::new(1)),
+                                (SwitchValue(1), BlockId::new(2)),
+                            ],
+                            otherwise: BlockId::new(3),
+                        },
+                    },
+                    OmBlock {
+                        id: BlockId::new(1),
+                        statements: vec![
+                            Statement::Assign {
+                                destination: LocalId::new(3),
+                                value: Rvalue::Variant {
+                                    ty: flow,
+                                    variant: VariantId::new(0),
+                                    fields: vec![Operand::Project {
+                                        base: LocalId::new(1),
+                                        path: vec![
+                                            ProjectElem::Downcast(VariantId::new(0)),
+                                            ProjectElem::Field(FieldId::new(0)),
+                                        ],
+                                        moved: false,
+                                    }],
+                                },
+                            },
+                            Statement::Assign {
+                                destination: LocalId::new(0),
+                                value: Rvalue::Use(Operand::Move(LocalId::new(3))),
+                            },
+                        ],
+                        terminator: Terminator::Return,
+                    },
+                    OmBlock {
+                        id: BlockId::new(2),
+                        statements: vec![
+                            Statement::Assign {
+                                destination: LocalId::new(4),
+                                value: Rvalue::Variant {
+                                    ty: residual,
+                                    variant: VariantId::new(1),
+                                    fields: vec![Operand::Project {
+                                        base: LocalId::new(1),
+                                        path: vec![
+                                            ProjectElem::Downcast(VariantId::new(1)),
+                                            ProjectElem::Field(FieldId::new(0)),
+                                        ],
+                                        moved: false,
+                                    }],
+                                },
+                            },
+                            Statement::Assign {
+                                destination: LocalId::new(5),
+                                value: Rvalue::Variant {
+                                    ty: flow,
+                                    variant: VariantId::new(1),
+                                    fields: vec![Operand::Move(LocalId::new(4))],
+                                },
+                            },
+                            Statement::Assign {
+                                destination: LocalId::new(0),
+                                value: Rvalue::Use(Operand::Move(LocalId::new(5))),
+                            },
+                        ],
+                        terminator: Terminator::Return,
+                    },
+                    OmBlock {
+                        id: BlockId::new(3),
+                        statements: vec![],
+                        terminator: Terminator::Unreachable,
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+fn result_variant(id: u32, name: &str, ty: OmType) -> OmVariant {
+    OmVariant {
+        id: VariantId::new(id),
+        name: name.to_owned(),
+        fields: vec![OmField {
+            id: FieldId::new(0),
+            name: "0".to_owned(),
+            ty,
+        }],
+    }
 }
 
 fn enum_program(tag: u32, field: u32) -> LirProgram {

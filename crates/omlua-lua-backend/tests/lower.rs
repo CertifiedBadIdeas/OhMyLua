@@ -718,6 +718,242 @@ fn lowers_enums_and_match_data_to_packed_tables() {
 }
 
 #[test]
+fn lowers_monomorphized_try_enums_to_self_describing_shapes() {
+    let result = TypeId::new(0);
+    let residual = TypeId::new(1);
+    let infallible = TypeId::new(2);
+    let flow = TypeId::new(3);
+    let program = OmProgram {
+        entry: FunctionId::new(0),
+        structs: vec![],
+        enums: vec![
+            OmEnum {
+                id: result,
+                name: "Result<i32, i32>".to_owned(),
+                variants: vec![
+                    payload_variant(0, "Ok", OmType::I32),
+                    payload_variant(1, "Err", OmType::I32),
+                ],
+            },
+            OmEnum {
+                id: residual,
+                name: "Result<Infallible, i32>".to_owned(),
+                variants: vec![
+                    payload_variant(0, "Ok", OmType::Enum(infallible)),
+                    payload_variant(1, "Err", OmType::I32),
+                ],
+            },
+            OmEnum {
+                id: infallible,
+                name: "Infallible".to_owned(),
+                variants: vec![],
+            },
+            OmEnum {
+                id: flow,
+                name: "ControlFlow<Result<Infallible, i32>, i32>".to_owned(),
+                variants: vec![
+                    payload_variant(0, "Continue", OmType::I32),
+                    payload_variant(1, "Break", OmType::Enum(residual)),
+                ],
+            },
+        ],
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "__omlua_result_branch<i32, i32>".to_owned(),
+            return_type: OmType::Enum(flow),
+            parameters: vec![LocalId::new(1)],
+            locals: vec![
+                om_local(0, OmType::Enum(flow), LocalKind::Return),
+                om_local(1, OmType::Enum(result), LocalKind::Parameter),
+                om_local(2, OmType::I32, LocalKind::Discriminant),
+                om_local(3, OmType::Enum(flow), LocalKind::Temporary),
+                om_local(4, OmType::Enum(residual), LocalKind::Temporary),
+                om_local(5, OmType::Enum(flow), LocalKind::Temporary),
+            ],
+            blocks: vec![
+                OmBlock {
+                    id: BlockId::new(0),
+                    statements: vec![Statement::Assign {
+                        destination: LocalId::new(2),
+                        value: Rvalue::Discriminant {
+                            source: Operand::Copy(LocalId::new(1)),
+                        },
+                    }],
+                    terminator: Terminator::SwitchInt {
+                        discriminant: Operand::Move(LocalId::new(2)),
+                        targets: vec![
+                            (SwitchValue(0), BlockId::new(1)),
+                            (SwitchValue(1), BlockId::new(2)),
+                        ],
+                        otherwise: BlockId::new(3),
+                    },
+                },
+                OmBlock {
+                    id: BlockId::new(1),
+                    statements: vec![
+                        Statement::Assign {
+                            destination: LocalId::new(3),
+                            value: Rvalue::Variant {
+                                ty: flow,
+                                variant: VariantId::new(0),
+                                fields: vec![Operand::Project {
+                                    base: LocalId::new(1),
+                                    path: vec![
+                                        ProjectElem::Downcast(VariantId::new(0)),
+                                        ProjectElem::Field(FieldId::new(0)),
+                                    ],
+                                    moved: false,
+                                }],
+                            },
+                        },
+                        Statement::Assign {
+                            destination: LocalId::new(0),
+                            value: Rvalue::Use(Operand::Move(LocalId::new(3))),
+                        },
+                    ],
+                    terminator: Terminator::Return,
+                },
+                OmBlock {
+                    id: BlockId::new(2),
+                    statements: vec![
+                        Statement::Assign {
+                            destination: LocalId::new(4),
+                            value: Rvalue::Variant {
+                                ty: residual,
+                                variant: VariantId::new(1),
+                                fields: vec![Operand::Project {
+                                    base: LocalId::new(1),
+                                    path: vec![
+                                        ProjectElem::Downcast(VariantId::new(1)),
+                                        ProjectElem::Field(FieldId::new(0)),
+                                    ],
+                                    moved: false,
+                                }],
+                            },
+                        },
+                        Statement::Assign {
+                            destination: LocalId::new(5),
+                            value: Rvalue::Variant {
+                                ty: flow,
+                                variant: VariantId::new(1),
+                                fields: vec![Operand::Move(LocalId::new(4))],
+                            },
+                        },
+                        Statement::Assign {
+                            destination: LocalId::new(0),
+                            value: Rvalue::Use(Operand::Move(LocalId::new(5))),
+                        },
+                    ],
+                    terminator: Terminator::Return,
+                },
+                OmBlock {
+                    id: BlockId::new(3),
+                    statements: vec![],
+                    terminator: Terminator::Unreachable,
+                },
+            ],
+        }],
+    };
+
+    let lir = lower_program(&program, &LuaBackendProfile::lua54()).unwrap();
+    let function = &lir.functions[0];
+    let infallible_shape = LirValueKind::Enum(vec![]);
+    let residual_shapes = vec![vec![infallible_shape], vec![LirValueKind::Integer]];
+    let flow_shapes = vec![
+        vec![LirValueKind::Integer],
+        vec![LirValueKind::Enum(residual_shapes.clone())],
+    ];
+    assert_eq!(
+        function.locals[0].kind,
+        LirValueKind::Enum(flow_shapes.clone())
+    );
+    assert_eq!(
+        function.locals[1].kind,
+        LirValueKind::Enum(vec![
+            vec![LirValueKind::Integer],
+            vec![LirValueKind::Integer]
+        ])
+    );
+    assert_eq!(
+        function.locals[4].kind,
+        LirValueKind::Enum(residual_shapes.clone())
+    );
+    assert_eq!(
+        function.blocks[0].terminator,
+        LirTerminator::Switch {
+            discriminant: LirExpression::Value(LirValue::Local(LirLocalId::new(2))),
+            targets: vec![(0, LirBlockId::new(1)), (1, LirBlockId::new(2))],
+            otherwise: LirBlockId::new(3),
+        }
+    );
+    assert_eq!(
+        function.blocks[1].statements,
+        vec![
+            LirStatement::Assign {
+                destination: LirLocalId::new(3),
+                value: LirExpression::Enum {
+                    shapes: flow_shapes.clone(),
+                    tag: 0,
+                    fields: vec![LirExpression::EnumField {
+                        value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(1)))),
+                        variant: 0,
+                        field: 0,
+                        result: LirValueKind::Integer,
+                    }],
+                },
+            },
+            LirStatement::Assign {
+                destination: LirLocalId::new(0),
+                value: LirExpression::Value(LirValue::Local(LirLocalId::new(3))),
+            },
+        ]
+    );
+    assert_eq!(
+        function.blocks[2].statements,
+        vec![
+            LirStatement::Assign {
+                destination: LirLocalId::new(4),
+                value: LirExpression::Enum {
+                    shapes: residual_shapes.clone(),
+                    tag: 1,
+                    fields: vec![LirExpression::EnumField {
+                        value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(1)))),
+                        variant: 1,
+                        field: 0,
+                        result: LirValueKind::Integer,
+                    }],
+                },
+            },
+            LirStatement::Assign {
+                destination: LirLocalId::new(5),
+                value: LirExpression::Enum {
+                    shapes: flow_shapes,
+                    tag: 1,
+                    fields: vec![LirExpression::Value(LirValue::Local(LirLocalId::new(4)))],
+                },
+            },
+            LirStatement::Assign {
+                destination: LirLocalId::new(0),
+                value: LirExpression::Value(LirValue::Local(LirLocalId::new(5))),
+            },
+        ]
+    );
+    assert_eq!(function.blocks[3].terminator, LirTerminator::Unreachable);
+}
+
+fn payload_variant(id: u32, name: &str, ty: OmType) -> OmVariant {
+    OmVariant {
+        id: VariantId::new(id),
+        name: name.to_owned(),
+        fields: vec![OmField {
+            id: FieldId::new(0),
+            name: "0".to_owned(),
+            ty,
+        }],
+    }
+}
+
+#[test]
 fn rejects_malformed_enum_programs() {
     let mut unknown_variant = enum_base();
     match &mut unknown_variant.functions[0].blocks[0].statements[0] {
