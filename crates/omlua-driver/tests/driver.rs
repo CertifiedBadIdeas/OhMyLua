@@ -1,5 +1,9 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_PROJECT: AtomicU64 = AtomicU64::new(0);
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -10,9 +14,47 @@ fn fixture(name: &str) -> PathBuf {
 
 fn compile(name: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_omlua-driver"))
+        .arg("emit-omir")
         .arg(fixture(name))
         .output()
         .expect("failed to run omlua-driver")
+}
+
+fn lua54_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tests/lua54/fixtures")
+        .join(name)
+}
+
+fn lua54_expected(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tests/lua54/expected")
+        .join(name)
+}
+
+fn project_directory(name: &str) -> PathBuf {
+    let sequence = NEXT_PROJECT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "omlua-driver-test-{}-{sequence}-{name}",
+        std::process::id()
+    ));
+    fs::create_dir(&path).expect("failed to create test project directory");
+    path
+}
+
+fn build(project: &Path, source: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_omlua-driver"))
+        .args(["build", "--backend", "lua54"])
+        .arg(source)
+        .current_dir(project)
+        .output()
+        .expect("failed to run omlua-driver")
+}
+
+fn artifact(project: &Path) -> PathBuf {
+    project.join("target/omlua/program.lua")
 }
 
 #[test]
@@ -163,6 +205,90 @@ fn preserves_rustc_failure_status_and_diagnostic() {
     let stderr = String::from_utf8(output.stderr).expect("rustc diagnostic is not UTF-8");
     assert!(stderr.contains("error[E0308]: mismatched types"));
     assert!(stderr.contains("expected `i32`, found `&str`"));
+}
+
+#[test]
+fn builds_the_exact_reviewed_lua54_artifact() {
+    let project = project_directory("exact-output");
+    let output = build(&project, &lua54_fixture("scalars.rs"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read(artifact(&project)).unwrap(),
+        fs::read(lua54_expected("scalars.lua")).unwrap()
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(PathBuf::from(stdout.trim()), artifact(&project));
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
+fn failed_build_removes_stale_artifact_without_touching_siblings() {
+    let project = project_directory("stale-output");
+    let output_directory = project.join("target/omlua");
+    fs::create_dir_all(&output_directory).unwrap();
+    fs::write(artifact(&project), "stale Lua").unwrap();
+    fs::write(output_directory.join("keep.txt"), "keep").unwrap();
+
+    let output = build(&project, &fixture("type_error.rs"));
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!artifact(&project).exists());
+    assert_eq!(
+        fs::read_to_string(output_directory.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
+fn output_directory_failure_writes_no_partial_artifact() {
+    let project = project_directory("output-failure");
+    fs::create_dir(project.join("target")).unwrap();
+    fs::write(project.join("target/omlua"), "not a directory").unwrap();
+
+    let output = build(&project, &lua54_fixture("scalars.rs"));
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!artifact(&project).exists());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Lua output directory"));
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
+fn driver_produced_lua_executes_with_the_documented_interpreter() {
+    let version = Command::new("lua")
+        .arg("-v")
+        .output()
+        .expect("Lua 5.4.8 is required on PATH");
+    assert!(version.status.success());
+    let version_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&version.stdout),
+        String::from_utf8_lossy(&version.stderr)
+    );
+    assert!(version_text.starts_with("Lua 5.4.8 "), "{version_text}");
+
+    let project = project_directory("execute");
+    let build_output = build(&project, &lua54_fixture("scalars.rs"));
+    assert!(build_output.status.success());
+    let execution = Command::new("lua")
+        .arg(artifact(&project))
+        .output()
+        .expect("failed to execute generated Lua");
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(execution.stdout.is_empty());
+    assert!(execution.stderr.is_empty());
+    fs::remove_dir_all(project).unwrap();
 }
 
 fn expected_omir() -> &'static str {

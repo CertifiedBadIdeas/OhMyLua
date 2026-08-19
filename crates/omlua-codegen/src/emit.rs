@@ -83,16 +83,18 @@ fn emit_function(output: &mut String, function: &LirFunction) {
 
     for block in &function.blocks {
         writeln!(output, "\n  ::bb{}::", block.id.index()).unwrap();
+        output.push_str("  do\n");
         for statement in &block.statements {
             match statement {
                 LirStatement::Assign { destination, value } => {
-                    write!(output, "  v{} = ", destination.index()).unwrap();
+                    write!(output, "    v{} = ", destination.index()).unwrap();
                     emit_expression(output, value);
                     output.push('\n');
                 }
             }
         }
         emit_terminator(output, &block.terminator);
+        output.push_str("  end\n");
     }
     output.push_str("end\n\n");
 }
@@ -100,7 +102,7 @@ fn emit_function(output: &mut String, function: &LirFunction) {
 fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
     match terminator {
         LirTerminator::Jump { target } => {
-            writeln!(output, "  goto bb{}", target.index()).unwrap();
+            writeln!(output, "    goto bb{}", target.index()).unwrap();
         }
         LirTerminator::Switch {
             discriminant,
@@ -108,19 +110,19 @@ fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
             otherwise,
         } => {
             for (index, (value, target)) in targets.iter().enumerate() {
-                output.push_str(if index == 0 { "  if " } else { "  elseif " });
+                output.push_str(if index == 0 { "    if " } else { "    elseif " });
                 emit_expression(output, discriminant);
                 output.push_str(" == ");
                 emit_integer(output, *value);
                 output.push_str(" then\n");
-                writeln!(output, "    goto bb{}", target.index()).unwrap();
+                writeln!(output, "      goto bb{}", target.index()).unwrap();
             }
             if targets.is_empty() {
-                writeln!(output, "  goto bb{}", otherwise.index()).unwrap();
-            } else {
-                output.push_str("  else\n");
                 writeln!(output, "    goto bb{}", otherwise.index()).unwrap();
-                output.push_str("  end\n");
+            } else {
+                output.push_str("    else\n");
+                writeln!(output, "      goto bb{}", otherwise.index()).unwrap();
+                output.push_str("    end\n");
             }
         }
         LirTerminator::Call {
@@ -129,7 +131,7 @@ fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
             destination,
             target,
         } => {
-            output.push_str("  ");
+            output.push_str("    ");
             if let Some(destination) = destination {
                 write!(output, "v{} = ", destination.index()).unwrap();
             }
@@ -141,23 +143,23 @@ fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
                 emit_expression(output, argument);
             }
             output.push_str(")\n");
-            writeln!(output, "  goto bb{}", target.index()).unwrap();
+            writeln!(output, "    goto bb{}", target.index()).unwrap();
         }
         LirTerminator::Branch {
             condition,
             if_true,
             if_false,
         } => {
-            output.push_str("  if ");
+            output.push_str("    if ");
             emit_expression(output, condition);
             output.push_str(" then\n");
-            writeln!(output, "    goto bb{}", if_true.index()).unwrap();
-            output.push_str("  else\n");
-            writeln!(output, "    goto bb{}", if_false.index()).unwrap();
-            output.push_str("  end\n");
+            writeln!(output, "      goto bb{}", if_true.index()).unwrap();
+            output.push_str("    else\n");
+            writeln!(output, "      goto bb{}", if_false.index()).unwrap();
+            output.push_str("    end\n");
         }
         LirTerminator::Return { value } => {
-            output.push_str("  return");
+            output.push_str("    return");
             if let Some(value) = value {
                 output.push(' ');
                 emit_expression(output, value);
@@ -165,12 +167,12 @@ fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
             output.push('\n');
         }
         LirTerminator::Raise { message } => {
-            output.push_str("  error(");
+            output.push_str("    error(");
             emit_string(output, message);
             output.push_str(", 0)\n");
         }
         LirTerminator::Unreachable => {
-            output.push_str("  error(\"entered unreachable code\", 0)\n");
+            output.push_str("    error(\"entered unreachable code\", 0)\n");
         }
     }
 }

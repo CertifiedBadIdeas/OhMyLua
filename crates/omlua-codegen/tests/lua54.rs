@@ -21,8 +21,10 @@ fn emits_readable_deterministic_lua54() {
             "  goto bb0\n",
             "\n",
             "  ::bb0::\n",
-            "  v0 = 7\n",
-            "  return v0\n",
+            "  do\n",
+            "    v0 = 7\n",
+            "    return v0\n",
+            "  end\n",
             "end\n",
             "\n",
             "return f0()\n",
@@ -49,20 +51,17 @@ fn emits_the_minimum_integer_without_converting_it_to_float() {
     assert!(source.contains("v0 = (-9223372036854775807 - 1)"));
 }
 
-#[cfg(windows)]
 #[test]
 fn reference_lua54_executes_division_and_remainder_with_rust_semantics() {
     assert_success(&helper_program(RuntimeHelper::I32DivTrunc), "-2\n");
     assert_success(&helper_program(RuntimeHelper::I32Rem), "-1\n");
 }
 
-#[cfg(windows)]
 #[test]
 fn reference_lua54_executes_calls_and_branches() {
     assert_success(&call_and_branch_program(), "42\n");
 }
 
-#[cfg(windows)]
 #[test]
 fn reference_lua54_reports_explicit_failure_paths() {
     assert_failure(
@@ -282,7 +281,6 @@ fn block_id(id: u32) -> LirBlockId {
     LirBlockId::new(id)
 }
 
-#[cfg(windows)]
 fn assert_success(program: &LirProgram, expected_stdout: &str) {
     let output = execute(program);
     assert!(
@@ -294,7 +292,6 @@ fn assert_success(program: &LirProgram, expected_stdout: &str) {
     assert!(output.stderr.is_empty());
 }
 
-#[cfg(windows)]
 fn assert_failure(program: &LirProgram, expected_stderr: &str) {
     let output = execute(program);
     assert!(!output.status.success());
@@ -306,7 +303,6 @@ fn assert_failure(program: &LirProgram, expected_stderr: &str) {
     );
 }
 
-#[cfg(windows)]
 fn execute(program: &LirProgram) -> std::process::Output {
     use std::{
         fs,
@@ -328,7 +324,19 @@ fn execute(program: &LirProgram) -> std::process::Output {
     let runner = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("tests/lua54/run_and_print.lua");
-    let output = Command::new(r"C:\msys64\usr\bin\lua.exe")
+    let version = Command::new("lua")
+        .arg("-v")
+        .output()
+        .expect("Lua 5.4.8 is required on PATH");
+    assert!(version.status.success());
+    let version_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&version.stdout),
+        String::from_utf8_lossy(&version.stderr)
+    );
+    assert!(version_text.starts_with("Lua 5.4.8 "), "{version_text}");
+
+    let output = Command::new("lua")
         .arg(runner)
         .arg(&program_path)
         .output()

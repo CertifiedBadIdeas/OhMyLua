@@ -1,7 +1,7 @@
 use omlua_ir::{
     AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FunctionId, LocalId, LocalKind,
-    OmBlock, OmFunction, OmLocal, OmProgram, OmType, Operand, Rvalue, Statement, Terminator,
-    UnwindAction,
+    OmBlock, OmFunction, OmLocal, OmProgram, OmType, Operand, Rvalue, Statement, SwitchValue,
+    Terminator, UnwindAction,
 };
 use omlua_lua_backend::{LuaBackendProfile, LuaDialect, lower_program};
 use omlua_lua_ir::{
@@ -66,6 +66,54 @@ fn rejects_cleanup_unwind_edges_with_context() {
             "error[OMLUA0002]: cleanup unwind edges are not supported by backend `lua54`\n",
             "  in function `main`, basic block bb0",
         )
+    );
+}
+
+#[test]
+fn lowers_boolean_switches_to_boolean_branches() {
+    let program = OmProgram {
+        entry: FunctionId::new(0),
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "choose".to_owned(),
+            return_type: OmType::Unit,
+            parameters: vec![LocalId::new(1)],
+            locals: vec![
+                om_local(0, OmType::Unit, LocalKind::Return),
+                om_local(1, OmType::Bool, LocalKind::Parameter),
+            ],
+            blocks: vec![
+                OmBlock {
+                    id: BlockId::new(0),
+                    statements: Vec::new(),
+                    terminator: Terminator::SwitchInt {
+                        discriminant: Operand::Copy(LocalId::new(1)),
+                        targets: vec![(SwitchValue(0), BlockId::new(2))],
+                        otherwise: BlockId::new(1),
+                    },
+                },
+                OmBlock {
+                    id: BlockId::new(1),
+                    statements: Vec::new(),
+                    terminator: Terminator::Return,
+                },
+                OmBlock {
+                    id: BlockId::new(2),
+                    statements: Vec::new(),
+                    terminator: Terminator::Return,
+                },
+            ],
+        }],
+    };
+
+    let lir = lower_program(&program, &LuaBackendProfile::lua54()).unwrap();
+    assert_eq!(
+        lir.functions[0].blocks[0].terminator,
+        LirTerminator::Branch {
+            condition: LirExpression::Value(LirValue::Local(LirLocalId::new(1))),
+            if_true: LirBlockId::new(1),
+            if_false: LirBlockId::new(2),
+        }
     );
 }
 

@@ -5,5 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+omlua-codegen = { path = "../omlua-codegen" }
 omlua-ir = { path = "../omlua-ir" }
+omlua-lua-backend = { path = "../omlua-lua-backend" }
+omlua-lua-ir = { path = "../omlua-lua-ir" }
 omlua-rustc = { path = "../omlua-rustc" }

@@ -234,20 +234,63 @@ impl<'a> FunctionLowerer<'a> {
                 discriminant,
                 targets,
                 otherwise,
-            } => Ok(LirTerminator::Switch {
-                discriminant: self.lower_operand(block, discriminant)?,
-                targets: targets
-                    .iter()
-                    .map(|(value, target)| {
-                        i64::try_from(value.0)
-                            .map(|value| (value, LirBlockId::new(target.index())))
-                            .map_err(|_| {
-                                self.block_error(block, "switch value does not fit Lua integer")
-                            })
+            } => {
+                let discriminant_type = self.operand_type(discriminant)?;
+                let discriminant = self.lower_operand(block, discriminant)?;
+                if discriminant_type == OmType::Bool {
+                    let mut if_false = LirBlockId::new(otherwise.index());
+                    let mut if_true = LirBlockId::new(otherwise.index());
+                    let mut seen_false = false;
+                    let mut seen_true = false;
+                    for (value, target) in targets {
+                        match value.0 {
+                            0 if !seen_false => {
+                                seen_false = true;
+                                if_false = LirBlockId::new(target.index());
+                            }
+                            1 if !seen_true => {
+                                seen_true = true;
+                                if_true = LirBlockId::new(target.index());
+                            }
+                            0 | 1 => {
+                                return Err(self.block_error(
+                                    block,
+                                    format!("boolean switch contains duplicate value {}", value.0),
+                                ));
+                            }
+                            value => {
+                                return Err(self.block_error(
+                                    block,
+                                    format!("boolean switch contains invalid value {value}"),
+                                ));
+                            }
+                        }
+                    }
+                    Ok(LirTerminator::Branch {
+                        condition: discriminant,
+                        if_true,
+                        if_false,
                     })
-                    .collect::<Result<_, _>>()?,
-                otherwise: LirBlockId::new(otherwise.index()),
-            }),
+                } else {
+                    Ok(LirTerminator::Switch {
+                        discriminant,
+                        targets: targets
+                            .iter()
+                            .map(|(value, target)| {
+                                i64::try_from(value.0)
+                                    .map(|value| (value, LirBlockId::new(target.index())))
+                                    .map_err(|_| {
+                                        self.block_error(
+                                            block,
+                                            "switch value does not fit Lua integer",
+                                        )
+                                    })
+                            })
+                            .collect::<Result<_, _>>()?,
+                        otherwise: LirBlockId::new(otherwise.index()),
+                    })
+                }
+            }
             Terminator::Call {
                 callee,
                 arguments,
@@ -345,12 +388,15 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn operand_is_unit(&self, operand: &Operand) -> Result<bool, LowerError> {
+        Ok(self.operand_type(operand)? == OmType::Unit)
+    }
+
+    fn operand_type(&self, operand: &Operand) -> Result<OmType, LowerError> {
         match operand {
-            Operand::Copy(local) | Operand::Move(local) => {
-                Ok(self.local_type(local.index())? == OmType::Unit)
-            }
-            Operand::Constant(Constant::Unit) => Ok(true),
-            Operand::Constant(Constant::Bool(_) | Constant::I32(_)) => Ok(false),
+            Operand::Copy(local) | Operand::Move(local) => self.local_type(local.index()),
+            Operand::Constant(Constant::Unit) => Ok(OmType::Unit),
+            Operand::Constant(Constant::Bool(_)) => Ok(OmType::Bool),
+            Operand::Constant(Constant::I32(_)) => Ok(OmType::I32),
         }
     }
 

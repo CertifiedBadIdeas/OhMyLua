@@ -19,7 +19,10 @@ dependencies = [
 name = "omlua-driver"
 version = "0.1.0"
 dependencies = [
+ "omlua-codegen",
  "omlua-ir",
+ "omlua-lua-backend",
+ "omlua-lua-ir",
  "omlua-rustc",
 ]
 
