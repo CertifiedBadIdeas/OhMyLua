@@ -536,6 +536,35 @@ fn builds_and_executes_the_exact_struct_method_artifact() {
     fs::remove_dir_all(project).unwrap();
 }
 
+#[test]
+fn builds_and_executes_the_exact_enum_match_artifact() {
+    let project = project_directory("enum-match");
+    let output = build(&project, &lua54_fixture("enum_match.rs"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read(artifact(&project)).unwrap(),
+        fs::read(lua54_expected("enum_match.lua")).unwrap()
+    );
+
+    let execution = Command::new("lua")
+        .arg(artifact(&project))
+        .output()
+        .expect("Lua 5.4.8 is required on PATH");
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(execution.stdout.is_empty());
+    assert!(execution.stderr.is_empty());
+    fs::remove_dir_all(project).unwrap();
+}
+
 fn expected_struct_omir() -> &'static str {
     concat!(
         "program entry @0\n",
