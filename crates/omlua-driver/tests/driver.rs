@@ -498,6 +498,61 @@ fn lowers_question_mark_operator_to_synthetic_try_helpers() {
 }
 
 #[test]
+fn lowers_while_loop_break_continue_and_value_loop() {
+    let output = compile("while_loop.rs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+
+    let omir = String::from_utf8(output.stdout).unwrap();
+    assert!(omir.contains("switch move %3 [0: bb7, otherwise: bb2]"));
+    assert!(omir.contains("switch move %7 [0: bb4, otherwise: bb1]"));
+    assert!(omir.contains("switch move %9 [0: bb5, otherwise: bb7]"));
+    assert!(omir.contains("switch move %15 [0: bb9, otherwise: bb8]"));
+    assert!(omir.contains("switch move %3"));
+    assert!(omir.contains("  bb6:\n    %2 = move %12\n    goto bb1"));
+    assert!(omir.contains("  bb10:\n    %2 = move %17\n    goto bb7"));
+    assert!(omir.contains("%14 = copy %2"));
+    assert!(omir.contains("(%5, %6) = checked_add copy %1, 1_i32"));
+    assert!(omir.contains("(%12, %13) = checked_add copy %2, copy %11"));
+    assert!(omir.contains("(%22, %23) = checked_sub copy %21, 8_i32"));
+    assert!(omir.contains("assert move %23 == false overflow_sub(move %21, 8_i32) -> bb12 unwind continue"));
+    assert!(omir.contains("assert move %18 == false overflow_add(copy %2, 1_i32) -> bb10 unwind continue"));
+}
+
+#[test]
+fn builds_and_executes_the_exact_while_loop_artifact() {
+    let project = project_directory("while-loop");
+    let output = build(&project, &lua54_fixture("while_loop.rs"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read(artifact(&project)).unwrap(),
+        fs::read(lua54_expected("while_loop.lua")).unwrap()
+    );
+
+    let execution = Command::new("lua")
+        .arg(artifact(&project))
+        .output()
+        .expect("Lua 5.4.8 is required on PATH");
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(execution.stdout.is_empty());
+    assert!(execution.stderr.is_empty());
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
 fn rejects_external_enums_outside_the_try_whitelist_without_partial_output() {
     let external = compile("unsupported_external_enum.rs");
     assert!(!external.status.success());
