@@ -611,6 +611,27 @@ fn builds_and_executes_the_exact_for_range_artifact() {
 }
 
 #[test]
+fn rejects_non_i32_ranges_and_iterator_adapters_without_partial_output() {
+    let unsigned = compile("unsupported_unsigned_range.rs");
+    assert!(!unsigned.status.success());
+    assert!(unsigned.stdout.is_empty());
+    assert!(
+        String::from_utf8(unsigned.stderr)
+            .unwrap()
+            .contains("range `std::ops::Range` is not supported; only `Range<i32>` is supported")
+    );
+
+    let step_by = compile("unsupported_step_by.rs");
+    assert!(!step_by.status.success());
+    assert!(step_by.stdout.is_empty());
+    assert!(
+        String::from_utf8(step_by.stderr)
+            .unwrap()
+            .contains("external structure `std::iter::StepBy` is not supported")
+    );
+}
+
+#[test]
 fn rejects_external_enums_outside_the_try_whitelist_without_partial_output() {
     let external = compile("unsupported_external_enum.rs");
     assert!(!external.status.success());
