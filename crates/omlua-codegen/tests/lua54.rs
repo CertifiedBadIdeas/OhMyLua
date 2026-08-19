@@ -97,6 +97,55 @@ fn emits_the_minimum_integer_without_converting_it_to_float() {
 }
 
 #[test]
+fn emits_and_validates_packed_tables() {
+    let program = table_program(1);
+    let source = emit_lua54(&program, &LuaBackendProfile::lua54()).unwrap();
+    assert!(source.contains("v0 = {20, 22}"));
+    assert!(source.contains("v1 = v0[1]"));
+
+    let error = emit_lua54(&table_program(0), &LuaBackendProfile::lua54()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "error[OMLUA0003]: function f0, block bb0 uses zero as a table index"
+    );
+
+    let mut scalar_index = table_program(1);
+    let LirStatement::Assign { value, .. } = &mut scalar_index.functions[0].blocks[0].statements[1];
+    let LirExpression::TableGet { table, .. } = value else {
+        unreachable!()
+    };
+    **table = integer(7);
+    assert_eq!(
+        emit_lua54(&scalar_index, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0003]: function f0, block bb0 has an invalid type in table indexing"
+    );
+
+    let out_of_bounds = table_program(3);
+    assert_eq!(
+        emit_lua54(&out_of_bounds, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0003]: function f0, block bb0 indexes field 3 of a table with 2 fields"
+    );
+
+    let mut wrong_result = table_program(1);
+    wrong_result.functions[0].locals[1].kind = LirValueKind::Bool;
+    let LirStatement::Assign { value, .. } = &mut wrong_result.functions[0].blocks[0].statements[1];
+    let LirExpression::TableGet { result, .. } = value else {
+        unreachable!()
+    };
+    *result = LirValueKind::Bool;
+    assert_eq!(
+        emit_lua54(&wrong_result, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0003]: function f0, block bb0 declares the wrong result type for table field 1"
+    );
+}
+
+#[test]
 fn reference_lua54_executes_division_and_remainder_with_rust_semantics() {
     assert_success(&helper_program(RuntimeHelper::I32DivTrunc), "-2\n");
     assert_success(&helper_program(RuntimeHelper::I32Rem), "-1\n");
@@ -121,6 +170,52 @@ fn reference_lua54_reports_explicit_failure_paths() {
     );
 }
 
+fn table_program(index: u32) -> LirProgram {
+    LirProgram {
+        entry: LirFunctionId::new(0),
+        requirements: BackendRequirements {
+            minimum_integer_bits: 64,
+            label_jumps: true,
+            native_bitwise: false,
+        },
+        helpers: vec![],
+        functions: vec![LirFunction {
+            id: LirFunctionId::new(0),
+            entry: LirBlockId::new(0),
+            parameters: vec![],
+            return_local: None,
+            locals: vec![
+                local_definition(
+                    0,
+                    LirValueKind::Table(vec![LirValueKind::Integer, LirValueKind::Integer]),
+                    false,
+                ),
+                local_definition(1, LirValueKind::Integer, false),
+            ],
+            blocks: vec![LirBlock {
+                id: LirBlockId::new(0),
+                statements: vec![
+                    assign(
+                        0,
+                        LirExpression::Table {
+                            fields: vec![integer(20), integer(22)],
+                        },
+                    ),
+                    assign(
+                        1,
+                        LirExpression::TableGet {
+                            table: Box::new(local(0)),
+                            index,
+                            result: LirValueKind::Integer,
+                        },
+                    ),
+                ],
+                terminator: LirTerminator::Return { value: None },
+            }],
+        }],
+    }
+}
+
 #[test]
 fn reference_lua54_executes_hand_built_omir_through_the_whole_backend() {
     assert_omir_success(&binary_omir(BinaryOp::Div, -7, 3), "-2\n");
@@ -137,6 +232,7 @@ fn reference_lua54_executes_hand_built_omir_through_the_whole_backend() {
 fn binary_omir(op: BinaryOp, left: i32, right: i32) -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
+        structs: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "calculate".to_owned(),
@@ -164,6 +260,7 @@ fn checked_add_omir(left: i32, right: i32) -> OmProgram {
     let right_operand = Operand::Constant(Constant::I32(right));
     OmProgram {
         entry: FunctionId::new(0),
+        structs: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "checked_add".to_owned(),
@@ -212,6 +309,7 @@ fn checked_add_omir(left: i32, right: i32) -> OmProgram {
 fn signed_switch_omir() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
+        structs: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "signed_switch".to_owned(),
@@ -244,6 +342,7 @@ fn signed_switch_omir() -> OmProgram {
 fn call_omir() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
+        structs: vec![],
         functions: vec![
             OmFunction {
                 id: FunctionId::new(0),

@@ -1,7 +1,7 @@
 use omlua_ir::{
-    AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FunctionId, LocalId, LocalKind,
-    OmBlock, OmFunction, OmLocal, OmProgram, OmType, Operand, Rvalue, Statement, SwitchValue,
-    Terminator, UnwindAction,
+    AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FieldId, FunctionId, LocalId,
+    LocalKind, OmBlock, OmField, OmFunction, OmLocal, OmProgram, OmStruct, OmType, Operand, Rvalue,
+    Statement, SwitchValue, Terminator, TypeId, UnwindAction,
 };
 use omlua_lua_backend::{LuaBackendProfile, LuaDialect, lower_program};
 use omlua_lua_ir::{
@@ -18,6 +18,135 @@ fn lua54_profile_records_the_reference_runtime_model() {
     assert_eq!(profile.numeric().float_bits, 64);
     assert!(profile.control_flow().label_jumps);
     assert!(profile.operators().native_bitwise);
+}
+
+#[test]
+fn lowers_structs_and_shared_references_to_packed_tables() {
+    let point = TypeId::new(0);
+    let program = OmProgram {
+        entry: FunctionId::new(0),
+        structs: vec![OmStruct {
+            id: point,
+            name: "Point".to_owned(),
+            fields: vec![
+                OmField {
+                    id: FieldId::new(0),
+                    name: "x".to_owned(),
+                    ty: OmType::I32,
+                },
+                OmField {
+                    id: FieldId::new(1),
+                    name: "y".to_owned(),
+                    ty: OmType::I32,
+                },
+            ],
+        }],
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "main".to_owned(),
+            return_type: OmType::Unit,
+            parameters: vec![],
+            locals: vec![
+                om_local(0, OmType::Unit, LocalKind::Return),
+                om_local(1, OmType::Struct(point), LocalKind::Temporary),
+                om_local(2, OmType::SharedRef(point), LocalKind::Temporary),
+                om_local(3, OmType::I32, LocalKind::Temporary),
+            ],
+            blocks: vec![OmBlock {
+                id: BlockId::new(0),
+                statements: vec![
+                    Statement::Assign {
+                        destination: LocalId::new(1),
+                        value: Rvalue::Struct {
+                            ty: point,
+                            fields: vec![
+                                Operand::Constant(Constant::I32(20)),
+                                Operand::Constant(Constant::I32(22)),
+                            ],
+                        },
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(2),
+                        value: Rvalue::SharedBorrow {
+                            source: Operand::Copy(LocalId::new(1)),
+                        },
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(3),
+                        value: Rvalue::Use(Operand::Project {
+                            base: LocalId::new(2),
+                            deref: true,
+                            fields: vec![FieldId::new(1)],
+                            moved: false,
+                        }),
+                    },
+                ],
+                terminator: Terminator::Return,
+            }],
+        }],
+    };
+
+    let lir = lower_program(&program, &LuaBackendProfile::lua54()).unwrap();
+    assert_eq!(
+        lir.functions[0].locals[0].kind,
+        LirValueKind::Table(vec![LirValueKind::Integer, LirValueKind::Integer])
+    );
+    assert_eq!(
+        lir.functions[0].blocks[0].statements,
+        vec![
+            LirStatement::Assign {
+                destination: LirLocalId::new(1),
+                value: LirExpression::Table {
+                    fields: vec![
+                        LirExpression::Value(LirValue::Integer(20)),
+                        LirExpression::Value(LirValue::Integer(22)),
+                    ],
+                },
+            },
+            LirStatement::Assign {
+                destination: LirLocalId::new(2),
+                value: LirExpression::Value(LirValue::Local(LirLocalId::new(1))),
+            },
+            LirStatement::Assign {
+                destination: LirLocalId::new(3),
+                value: LirExpression::TableGet {
+                    table: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(2)))),
+                    index: 2,
+                    result: LirValueKind::Integer,
+                },
+            },
+        ]
+    );
+
+    let mut missing_type = program.clone();
+    missing_type.functions[0].locals[1].ty = OmType::Struct(TypeId::new(9));
+    assert_eq!(
+        lower_program(&missing_type, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        concat!(
+            "error[OMLUA0002]: local type references missing structure @9\n",
+            "  in function `main`",
+        )
+    );
+
+    let mut invalid_fields = program.clone();
+    invalid_fields.structs[0].fields[0].id = FieldId::new(1);
+    assert_eq!(
+        lower_program(&invalid_fields, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0002]: structure @0 has non-contiguous field identifier .1"
+    );
+
+    let mut recursive = program.clone();
+    recursive.structs[0].fields[0].ty = OmType::Struct(point);
+    assert_eq!(
+        lower_program(&recursive, &LuaBackendProfile::lua54())
+            .unwrap_err()
+            .to_string(),
+        "error[OMLUA0002]: structure definitions contain a by-value cycle through @0"
+    );
 }
 
 #[test]
@@ -73,6 +202,7 @@ fn rejects_cleanup_unwind_edges_with_context() {
 fn lowers_boolean_switches_to_boolean_branches() {
     let program = OmProgram {
         entry: FunctionId::new(0),
+        structs: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "choose".to_owned(),
@@ -121,6 +251,7 @@ fn lowers_boolean_switches_to_boolean_branches() {
 fn decodes_signed_i32_switch_values_from_their_rustc_bits() {
     let program = OmProgram {
         entry: FunctionId::new(0),
+        structs: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "choose".to_owned(),
@@ -168,6 +299,7 @@ fn decodes_signed_i32_switch_values_from_their_rustc_bits() {
 fn division_program() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
+        structs: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "calculate".to_owned(),
@@ -213,6 +345,7 @@ fn division_program() -> OmProgram {
 fn cleanup_unwind_program() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
+        structs: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "main".to_owned(),
@@ -237,6 +370,7 @@ fn cleanup_unwind_program() -> OmProgram {
 fn checked_add_program() -> OmProgram {
     OmProgram {
         entry: FunctionId::new(0),
+        structs: vec![],
         functions: vec![OmFunction {
             id: FunctionId::new(0),
             name: "main".to_owned(),

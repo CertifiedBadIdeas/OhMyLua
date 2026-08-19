@@ -1,15 +1,16 @@
 use std::collections::HashSet;
 
 use omlua_ir::{
-    AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FunctionId, LocalId, LocalKind,
-    OmBlock, OmFunction, OmLocal, OmType, Operand, Rvalue, Statement, SwitchValue, Terminator,
-    UnaryOp, UnwindAction,
+    AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FieldId, FunctionId, LocalId,
+    LocalKind, OmBlock, OmFunction, OmLocal, OmType, Operand, Rvalue, Statement, SwitchValue,
+    Terminator, UnaryOp, UnwindAction,
 };
 use rustc_index::Idx;
 use rustc_middle::mir::{
-    self, AssertKind as MirAssertKind, BasicBlock, BinOp as MirBinOp, Body, Local,
-    Operand as MirOperand, Place, PlaceElem, RETURN_PLACE, Rvalue as MirRvalue, StatementKind,
-    TerminatorKind, UnOp as MirUnOp, UnwindAction as MirUnwindAction, UnwindTerminateReason,
+    self, AggregateKind, AssertKind as MirAssertKind, BasicBlock, BinOp as MirBinOp, Body,
+    BorrowKind, Local, Operand as MirOperand, Place, PlaceElem, RETURN_PLACE, Rvalue as MirRvalue,
+    StatementKind, TerminatorKind, UnOp as MirUnOp, UnwindAction as MirUnwindAction,
+    UnwindTerminateReason,
 };
 use rustc_middle::ty::{self, IntTy, Ty, TyCtxt, TypingEnv};
 use rustc_span::def_id::DefId;
@@ -71,9 +72,15 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                     push_local(&mut locals, OmType::Bool, LocalKind::CheckedOverflow, &name)?;
                 local_map.push(LocalMapping::CheckedPair { value, overflow });
             } else {
-                let ty = lower_type(declaration.ty).map_err(|detail| {
-                    LowerError::function(&name, format!("local _{}: {detail}", local.index()))
-                })?;
+                let ty = registry
+                    .types
+                    .lower_type(tcx, declaration.ty)
+                    .map_err(|error| {
+                        LowerError::function(
+                            &name,
+                            format!("local _{}: {}", local.index(), error.detail()),
+                        )
+                    })?;
                 let kind = if local == RETURN_PLACE {
                     LocalKind::Return
                 } else if local.index() <= body.arg_count {
@@ -206,6 +213,39 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                 left: self.lower_operand(block, &operands.0)?,
                 right: self.lower_operand(block, &operands.1)?,
             }),
+            MirRvalue::Aggregate(kind, operands) => {
+                let AggregateKind::Adt(def_id, variant, _, _, _) = kind.as_ref() else {
+                    return Err(self.block_error(block, "non-structure aggregate is not supported"));
+                };
+                if variant.as_usize() != 0 {
+                    return Err(self.block_error(block, "enum aggregates are not supported"));
+                }
+                let ty = self.registry.types.type_id(*def_id).ok_or_else(|| {
+                    self.block_error(
+                        block,
+                        format!(
+                            "structure `{}` was not registered",
+                            self.tcx.def_path_str(*def_id)
+                        ),
+                    )
+                })?;
+                Ok(Rvalue::Struct {
+                    ty,
+                    fields: operands
+                        .iter()
+                        .map(|operand| self.lower_operand(block, operand))
+                        .collect::<Result<_, _>>()?,
+                })
+            }
+            MirRvalue::Ref(_, borrow_kind, place) => {
+                if !matches!(borrow_kind, BorrowKind::Shared) {
+                    return Err(
+                        self.block_error(block, "only shared structure borrows are supported")
+                    );
+                }
+                let source = self.lower_shared_borrow_source(block, place)?;
+                Ok(Rvalue::SharedBorrow { source })
+            }
             other => {
                 Err(self.block_error(block, format!("MIR rvalue `{other:?}` is not supported")))
             }
@@ -218,37 +258,198 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         operand: &MirOperand<'tcx>,
     ) -> Result<Operand, LowerError> {
         match operand {
-            MirOperand::Copy(place) => Ok(Operand::Copy(self.lower_place(block, place)?)),
-            MirOperand::Move(place) => Ok(Operand::Move(self.lower_place(block, place)?)),
+            MirOperand::Copy(place) => self.lower_operand_place(block, place, false),
+            MirOperand::Move(place) => self.lower_operand_place(block, place, true),
             MirOperand::Constant(constant) => {
                 let ty = constant.const_.ty();
                 let typing_env = TypingEnv::fully_monomorphized();
-                let value =
-                    match lower_type(ty).map_err(|detail| self.block_error(block, detail))? {
-                        OmType::Unit => Constant::Unit,
-                        OmType::Bool => Constant::Bool(
-                            constant
-                                .const_
-                                .try_eval_bool(self.tcx, typing_env)
-                                .ok_or_else(|| {
-                                    self.block_error(block, "bool constant is not evaluable")
-                                })?,
-                        ),
-                        OmType::I32 => {
-                            let bits = constant
-                                .const_
-                                .try_eval_bits(self.tcx, typing_env)
-                                .ok_or_else(|| {
-                                    self.block_error(block, "i32 constant is not evaluable")
-                                })?;
-                            Constant::I32(bits as u32 as i32)
-                        }
-                    };
+                let value = match ty.kind() {
+                    ty::Tuple(fields) if fields.is_empty() => Constant::Unit,
+                    ty::Bool => Constant::Bool(
+                        constant
+                            .const_
+                            .try_eval_bool(self.tcx, typing_env)
+                            .ok_or_else(|| {
+                                self.block_error(block, "bool constant is not evaluable")
+                            })?,
+                    ),
+                    ty::Int(IntTy::I32) => {
+                        let bits = constant
+                            .const_
+                            .try_eval_bits(self.tcx, typing_env)
+                            .ok_or_else(|| {
+                                self.block_error(block, "i32 constant is not evaluable")
+                            })?;
+                        Constant::I32(bits as u32 as i32)
+                    }
+                    _ => {
+                        return Err(self
+                            .block_error(block, format!("constant type `{ty}` is not supported")));
+                    }
+                };
                 Ok(Operand::Constant(value))
             }
             MirOperand::RuntimeChecks(_) => {
                 Err(self.block_error(block, "runtime-check query operands are not supported"))
             }
+        }
+    }
+
+    fn lower_operand_place(
+        &self,
+        block: BasicBlock,
+        place: &Place<'tcx>,
+        moved: bool,
+    ) -> Result<Operand, LowerError> {
+        if matches!(
+            self.local_map[place.local.index()],
+            LocalMapping::CheckedPair { .. }
+        ) {
+            let local = self.lower_place(block, place)?;
+            return Ok(if moved {
+                Operand::Move(local)
+            } else {
+                Operand::Copy(local)
+            });
+        }
+
+        let LocalMapping::Scalar(base) = self.local_map[place.local.index()] else {
+            unreachable!()
+        };
+        if place.projection.is_empty() {
+            return Ok(if moved {
+                Operand::Move(base)
+            } else {
+                Operand::Copy(base)
+            });
+        }
+
+        let mut ty = self.locals[base.index() as usize].ty;
+        let mut fields = Vec::new();
+        let mut deref = false;
+        for projection in place.projection.as_ref() {
+            match projection {
+                PlaceElem::Deref => {
+                    let OmType::SharedRef(id) = ty else {
+                        return Err(self.block_error(
+                            block,
+                            "dereference of a non-shared-structure reference is not supported",
+                        ));
+                    };
+                    if deref || !fields.is_empty() {
+                        return Err(self.block_error(block, "nested dereference is not supported"));
+                    }
+                    deref = true;
+                    ty = OmType::Struct(id);
+                }
+                PlaceElem::Field(field, _) => {
+                    let OmType::Struct(type_id) = ty else {
+                        return Err(
+                            self.block_error(block, "field access on a non-structure value")
+                        );
+                    };
+                    let definition = self.registry.types.definition(type_id).ok_or_else(|| {
+                        self.block_error(block, format!("structure type @{type_id} is incomplete"))
+                    })?;
+                    let definition_field =
+                        definition.fields.get(field.as_usize()).ok_or_else(|| {
+                            self.block_error(
+                                block,
+                                format!(
+                                    "field .{} does not exist in structure @{type_id}",
+                                    field.as_usize()
+                                ),
+                            )
+                        })?;
+                    fields.push(FieldId::new(field.as_u32()));
+                    ty = definition_field.ty;
+                }
+                other => {
+                    return Err(self.block_error(
+                        block,
+                        format!("place projection `{other:?}` is not supported"),
+                    ));
+                }
+            }
+        }
+        if fields.is_empty() && !deref {
+            Ok(if moved {
+                Operand::Move(base)
+            } else {
+                Operand::Copy(base)
+            })
+        } else {
+            Ok(Operand::Project {
+                base,
+                deref,
+                fields,
+                moved,
+            })
+        }
+    }
+
+    fn lower_shared_borrow_source(
+        &self,
+        block: BasicBlock,
+        place: &Place<'tcx>,
+    ) -> Result<Operand, LowerError> {
+        let source = self.lower_operand_place(block, place, false)?;
+        if !matches!(self.om_operand_type(&source)?, OmType::Struct(_)) {
+            return Err(self.block_error(block, "shared borrow source is not a structure"));
+        }
+        Ok(source)
+    }
+
+    fn om_operand_type(&self, operand: &Operand) -> Result<OmType, LowerError> {
+        match operand {
+            Operand::Copy(local) | Operand::Move(local) => {
+                Ok(self.locals[local.index() as usize].ty)
+            }
+            Operand::Project {
+                base,
+                deref,
+                fields,
+                ..
+            } => {
+                let mut ty = self.locals[base.index() as usize].ty;
+                if *deref {
+                    let OmType::SharedRef(id) = ty else {
+                        return Err(LowerError::function(
+                            &self.name,
+                            "dereference source is not a shared structure reference",
+                        ));
+                    };
+                    ty = OmType::Struct(id);
+                }
+                for field in fields {
+                    let type_id = match ty {
+                        OmType::Struct(id) | OmType::SharedRef(id) => id,
+                        _ => {
+                            return Err(LowerError::function(
+                                &self.name,
+                                "field projection crosses a non-structure value",
+                            ));
+                        }
+                    };
+                    ty = self
+                        .registry
+                        .types
+                        .definition(type_id)
+                        .and_then(|definition| definition.fields.get(field.index() as usize))
+                        .filter(|definition| definition.id == *field)
+                        .ok_or_else(|| {
+                            LowerError::function(
+                                &self.name,
+                                format!("field .{field} does not exist in structure @{type_id}"),
+                            )
+                        })?
+                        .ty;
+                }
+                Ok(ty)
+            }
+            Operand::Constant(Constant::Unit) => Ok(OmType::Unit),
+            Operand::Constant(Constant::Bool(_)) => Ok(OmType::Bool),
+            Operand::Constant(Constant::I32(_)) => Ok(OmType::I32),
         }
     }
 
@@ -429,15 +630,6 @@ fn validate_checked_pair_type(ty: Ty<'_>) -> Result<(), &'static str> {
         return Err("checked arithmetic tuple is not `(i32, bool)`");
     }
     Ok(())
-}
-
-fn lower_type(ty: Ty<'_>) -> Result<OmType, String> {
-    match ty.kind() {
-        ty::Tuple(fields) if fields.is_empty() => Ok(OmType::Unit),
-        ty::Bool => Ok(OmType::Bool),
-        ty::Int(IntTy::I32) => Ok(OmType::I32),
-        _ => Err(format!("type `{ty}` is not supported")),
-    }
 }
 
 fn push_local(

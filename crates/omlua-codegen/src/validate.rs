@@ -119,7 +119,7 @@ fn validate_function(
     }
     let mut locals = BTreeMap::new();
     for local in &function.locals {
-        if locals.insert(local.id, local.kind).is_some() {
+        if locals.insert(local.id, local.kind.clone()).is_some() {
             return Err(error(format!(
                 "{context} defines local v{} twice",
                 local.id.index()
@@ -177,7 +177,7 @@ fn validate_function(
         }
         validate_terminator(
             &block.terminator,
-            return_kind,
+            return_kind.clone(),
             &locals,
             &blocks,
             functions,
@@ -251,7 +251,7 @@ fn validate_terminator(
                     .locals
                     .iter()
                     .find(|local| local.id == *parameter)
-                    .map(|local| local.kind)
+                    .map(|local| local.kind.clone())
                     .ok_or_else(|| {
                         error(format!(
                             "function f{} has an invalid parameter",
@@ -268,7 +268,7 @@ fn validate_terminator(
                         .locals
                         .iter()
                         .find(|local| local.id == id)
-                        .map(|local| local.kind)
+                        .map(|local| local.kind.clone())
                         .ok_or_else(|| {
                             error(format!(
                                 "function f{} has an invalid return local",
@@ -331,7 +331,7 @@ fn expression_kind(
                 LirUnaryOp::Neg => LirValueKind::Integer,
                 LirUnaryOp::Not => LirValueKind::Bool,
             };
-            require_kind(expected, actual, context, "unary operation")?;
+            require_kind(expected.clone(), actual, context, "unary operation")?;
             Ok(expected)
         }
         LirExpression::Binary { op, left, right } => {
@@ -354,7 +354,7 @@ fn expression_kind(
                     return Ok(LirValueKind::Bool);
                 }
             };
-            require_kind(operand, left, context, "binary operation")?;
+            require_kind(operand.clone(), left, context, "binary operation")?;
             require_kind(operand, right, context, "binary operation")?;
             Ok(result)
         }
@@ -379,6 +379,46 @@ fn expression_kind(
             }
             Ok(LirValueKind::Integer)
         }
+        LirExpression::Table { fields } => {
+            let mut kinds = Vec::with_capacity(fields.len());
+            for field in fields {
+                kinds.push(expression_kind(
+                    field,
+                    locals,
+                    helpers,
+                    used_helpers,
+                    context,
+                )?);
+            }
+            Ok(LirValueKind::Table(kinds))
+        }
+        LirExpression::TableGet {
+            table,
+            index,
+            result,
+        } => {
+            let actual = expression_kind(table, locals, helpers, used_helpers, context)?;
+            if *index == 0 {
+                return Err(error(format!("{context} uses zero as a table index")));
+            }
+            let LirValueKind::Table(fields) = actual else {
+                return Err(error(format!(
+                    "{context} has an invalid type in table indexing"
+                )));
+            };
+            let Some(actual_result) = fields.get((*index - 1) as usize) else {
+                return Err(error(format!(
+                    "{context} indexes field {index} of a table with {} fields",
+                    fields.len()
+                )));
+            };
+            if actual_result != result {
+                return Err(error(format!(
+                    "{context} declares the wrong result type for table field {index}"
+                )));
+            }
+            Ok(result.clone())
+        }
     }
 }
 
@@ -387,7 +427,7 @@ fn local_kind(
     id: LirLocalId,
     context: &str,
 ) -> Result<LirValueKind, CodegenError> {
-    locals.get(&id).copied().ok_or_else(|| {
+    locals.get(&id).cloned().ok_or_else(|| {
         error(format!(
             "{context} references missing local v{}",
             id.index()

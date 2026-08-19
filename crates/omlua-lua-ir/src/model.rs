@@ -38,10 +38,11 @@ pub struct LirLocal {
     pub parameter: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LirValueKind {
     Bool,
     Integer,
+    Table(Vec<LirValueKind>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +75,14 @@ pub enum LirExpression {
     RuntimeCall {
         helper: RuntimeHelper,
         arguments: Vec<LirExpression>,
+    },
+    Table {
+        fields: Vec<LirExpression>,
+    },
+    TableGet {
+        table: Box<LirExpression>,
+        index: u32,
+        result: LirValueKind,
     },
 }
 

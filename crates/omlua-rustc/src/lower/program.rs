@@ -8,6 +8,7 @@ use rustc_span::def_id::DefId;
 use crate::LowerError;
 
 use super::body::lower_function;
+use super::types::TypeRegistry;
 
 pub(crate) fn lower_program(tcx: TyCtxt<'_>) -> Result<OmProgram, LowerError> {
     let (entry_def, _) = tcx
@@ -23,12 +24,18 @@ pub(crate) fn lower_program(tcx: TyCtxt<'_>) -> Result<OmProgram, LowerError> {
         functions.push(lower_function(tcx, def_id, id, &mut registry)?);
     }
 
-    Ok(OmProgram { entry, functions })
+    let structs = registry.types.finish()?;
+    Ok(OmProgram {
+        entry,
+        structs,
+        functions,
+    })
 }
 
 pub(super) struct FunctionRegistry {
     ids: HashMap<DefId, FunctionId>,
     pending: VecDeque<DefId>,
+    pub(super) types: TypeRegistry,
 }
 
 impl FunctionRegistry {
@@ -36,6 +43,7 @@ impl FunctionRegistry {
         Self {
             ids: HashMap::new(),
             pending: VecDeque::new(),
+            types: TypeRegistry::new(),
         }
     }
 
@@ -51,11 +59,22 @@ impl FunctionRegistry {
                 tcx.def_path_str(def_id)
             )));
         }
-        if tcx.def_kind(def_id) != DefKind::Fn {
-            return Err(LowerError::program(format!(
-                "callable `{}` is not a free function",
-                tcx.def_path_str(def_id)
-            )));
+        match tcx.def_kind(def_id) {
+            DefKind::Fn => {}
+            DefKind::AssocFn
+                if tcx.trait_of_assoc(def_id).is_none() && tcx.trait_item_of(def_id).is_none() => {}
+            DefKind::AssocFn => {
+                return Err(LowerError::program(format!(
+                    "trait method `{}` is not supported",
+                    tcx.def_path_str(def_id)
+                )));
+            }
+            _ => {
+                return Err(LowerError::program(format!(
+                    "callable `{}` is not a function",
+                    tcx.def_path_str(def_id)
+                )));
+            }
         }
         if !generic_args.is_empty() || tcx.generics_of(def_id).count() != 0 {
             return Err(LowerError::program(format!(

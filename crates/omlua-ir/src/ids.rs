@@ -26,3 +26,5 @@ macro_rules! define_id {
 define_id!(FunctionId);
 define_id!(LocalId);
 define_id!(BlockId);
+define_id!(TypeId);
+define_id!(FieldId);

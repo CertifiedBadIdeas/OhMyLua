@@ -48,10 +48,15 @@ impl fmt::Display for LirFunction {
 
 impl fmt::Display for LirValueKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Bool => "bool",
-            Self::Integer => "integer",
-        })
+        match self {
+            Self::Bool => formatter.write_str("bool"),
+            Self::Integer => formatter.write_str("integer"),
+            Self::Table(fields) => {
+                formatter.write_str("table<")?;
+                write_joined(formatter, fields, |formatter, field| field.fmt(formatter))?;
+                formatter.write_str(">")
+            }
+        }
     }
 }
 
@@ -76,6 +81,16 @@ impl fmt::Display for LirExpression {
                 })?;
                 formatter.write_str(")")
             }
+            Self::Table { fields } => {
+                formatter.write_str("table {")?;
+                write_joined(formatter, fields, |formatter, field| field.fmt(formatter))?;
+                formatter.write_str("}")
+            }
+            Self::TableGet {
+                table,
+                index,
+                result,
+            } => write!(formatter, "table_get {table}[{index}] -> {result}"),
         }
     }
 }

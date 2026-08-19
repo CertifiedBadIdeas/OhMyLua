@@ -31,6 +31,10 @@ impl LowerError {
             detail: detail.into(),
         }
     }
+
+    pub(crate) fn detail(&self) -> &str {
+        &self.detail
+    }
 }
 
 impl fmt::Display for LowerError {

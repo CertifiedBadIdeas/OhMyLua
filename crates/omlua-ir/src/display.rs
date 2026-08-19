@@ -1,18 +1,38 @@
 use std::fmt::{self, Write};
 
 use crate::{
-    AssertKind, BinaryOp, CheckedBinaryOp, Constant, LocalKind, OmFunction, OmProgram, OmType,
-    Operand, Rvalue, Statement, Terminator, UnaryOp, UnwindAction,
+    AssertKind, BinaryOp, CheckedBinaryOp, Constant, LocalKind, OmFunction, OmProgram, OmStruct,
+    OmType, Operand, Rvalue, Statement, Terminator, UnaryOp, UnwindAction,
 };
 
 impl fmt::Display for OmProgram {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(formatter, "program entry @{}", self.entry)?;
+        for definition in &self.structs {
+            writeln!(formatter)?;
+            write!(formatter, "{definition}")?;
+        }
         for function in &self.functions {
             writeln!(formatter)?;
             write!(formatter, "{function}")?;
         }
         Ok(())
+    }
+}
+
+impl fmt::Display for OmStruct {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(formatter, "struct @{} {} {{", self.id, self.name)?;
+        for field in &self.fields {
+            writeln!(
+                formatter,
+                "  .{} {}: {}",
+                field.id,
+                field.name,
+                type_name(field.ty)
+            )?;
+        }
+        writeln!(formatter, "}}")
     }
 }
 
@@ -49,11 +69,13 @@ impl fmt::Display for OmFunction {
     }
 }
 
-fn type_name(ty: OmType) -> &'static str {
+fn type_name(ty: OmType) -> String {
     match ty {
-        OmType::Unit => "unit",
-        OmType::Bool => "bool",
-        OmType::I32 => "i32",
+        OmType::Unit => "unit".to_owned(),
+        OmType::Bool => "bool".to_owned(),
+        OmType::I32 => "i32".to_owned(),
+        OmType::Struct(id) => format!("struct @{id}"),
+        OmType::SharedRef(id) => format!("&struct @{id}"),
     }
 }
 
@@ -99,6 +121,17 @@ fn format_rvalue(value: &Rvalue) -> String {
             format_operand(left),
             format_operand(right)
         ),
+        Rvalue::Struct { ty, fields } => format!(
+            "struct @{ty} {{ {} }}",
+            fields
+                .iter()
+                .map(format_operand)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Rvalue::SharedBorrow { source } => {
+            format!("borrow_shared {}", format_operand_without_mode(source))
+        }
     }
 }
 
@@ -181,12 +214,50 @@ fn format_operand(operand: &Operand) -> String {
     match operand {
         Operand::Copy(local) => format!("copy %{local}"),
         Operand::Move(local) => format!("move %{local}"),
+        Operand::Project {
+            base,
+            deref,
+            fields,
+            moved,
+        } => {
+            let place = format_projected_place(*base, *deref, fields);
+            format!("{} {place}", if *moved { "move" } else { "copy" })
+        }
         Operand::Constant(constant) => match constant {
             Constant::Unit => "unit".to_owned(),
             Constant::Bool(value) => value.to_string(),
             Constant::I32(value) => format!("{value}_i32"),
         },
     }
+}
+
+fn format_operand_without_mode(operand: &Operand) -> String {
+    match operand {
+        Operand::Constant(_) => format_operand(operand),
+        Operand::Copy(local) | Operand::Move(local) => format!("%{local}"),
+        Operand::Project {
+            base,
+            deref,
+            fields,
+            ..
+        } => format_projected_place(*base, *deref, fields),
+    }
+}
+
+fn format_projected_place(base: crate::LocalId, deref: bool, fields: &[crate::FieldId]) -> String {
+    let mut place = if deref {
+        if fields.is_empty() {
+            format!("*%{base}")
+        } else {
+            format!("(*%{base})")
+        }
+    } else {
+        format!("%{base}")
+    };
+    for field in fields {
+        write!(place, ".{field}").expect("writing to a String cannot fail");
+    }
+    place
 }
 
 fn unary_name(op: UnaryOp) -> &'static str {
@@ -243,6 +314,7 @@ mod tests {
     fn formats_program_deterministically() {
         let program = OmProgram {
             entry: FunctionId::new(0),
+            structs: vec![],
             functions: vec![OmFunction {
                 id: FunctionId::new(0),
                 name: "omlua_input::main".to_owned(),

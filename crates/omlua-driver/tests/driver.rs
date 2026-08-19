@@ -149,8 +149,116 @@ fn rejects_associated_calls_without_partial_output() {
     assert!(output.stdout.is_empty());
 
     let stderr = String::from_utf8(output.stderr).expect("OMLua diagnostic is not UTF-8");
-    assert!(stderr.contains("callable `Operations::add` is not a free function"));
+    assert!(stderr.contains("trait method `Operations::add` is not supported"));
     assert!(stderr.contains("in function `main`, basic block bb0"));
+}
+
+#[test]
+fn lowers_named_structs_shared_references_and_inherent_methods() {
+    let output = compile("struct_method.rs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+
+    let omir = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(omir, expected_struct_omir());
+}
+
+#[test]
+fn rejects_mutable_references_and_tuple_structs_without_partial_output() {
+    let mutable = compile("unsupported_mut_reference.rs");
+    assert!(!mutable.status.success());
+    assert!(mutable.stdout.is_empty());
+    assert!(
+        String::from_utf8(mutable.stderr)
+            .unwrap()
+            .contains("mutable reference `&mut Counter` is not supported")
+    );
+
+    let tuple = compile("unsupported_tuple_struct.rs");
+    assert!(!tuple.status.success());
+    assert!(tuple.stdout.is_empty());
+    assert!(
+        String::from_utf8(tuple.stderr)
+            .unwrap()
+            .contains("tuple struct `Pair` is not supported")
+    );
+}
+
+#[test]
+fn lowers_nested_struct_field_paths() {
+    let output = compile("nested_struct.rs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let omir = String::from_utf8(output.stdout).unwrap();
+    assert!(omir.contains("struct @0 Point"));
+    assert!(omir.contains("struct @1 Holder"));
+    assert!(omir.contains("borrow_shared (*%1).0"));
+    assert!(omir.contains("copy (*%1).0"));
+    assert!(omir.contains("copy (*%1).1"));
+}
+
+#[test]
+fn lowers_a_whole_copy_struct_dereference() {
+    let output = compile("deref_copy_struct.rs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let omir = String::from_utf8(output.stdout).unwrap();
+    assert!(omir.contains("copy *%1"));
+}
+
+#[test]
+fn builds_and_executes_a_method_borrowed_from_a_nested_field() {
+    let project = project_directory("nested-struct-method");
+    let output = build(&project, &fixture("nested_struct.rs"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let execution = Command::new("lua")
+        .arg(artifact(&project))
+        .output()
+        .expect("Lua 5.4.8 is required on PATH");
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(execution.stdout.is_empty());
+    assert!(execution.stderr.is_empty());
+    fs::remove_dir_all(project).unwrap();
+}
+
+#[test]
+fn rejects_generic_structs_and_reference_fields_without_partial_output() {
+    let generic = compile("unsupported_generic_struct.rs");
+    assert!(!generic.status.success());
+    assert!(generic.stdout.is_empty());
+    assert!(
+        String::from_utf8(generic.stderr)
+            .unwrap()
+            .contains("generic structure `Wrapper` is not supported")
+    );
+
+    let reference_field = compile("unsupported_reference_field.rs");
+    assert!(!reference_field.status.success());
+    assert!(reference_field.stdout.is_empty());
+    assert!(
+        String::from_utf8(reference_field.stderr)
+            .unwrap()
+            .contains("reference field `value` in structure `Holder` is not supported")
+    );
 }
 
 #[test]
@@ -179,7 +287,7 @@ fn rejects_references_without_partial_output() {
     assert_eq!(
         stderr,
         concat!(
-            "error[OMLUA0001]: local _3: type `&i32` is not supported\n",
+            "error[OMLUA0001]: local _3: shared reference `&i32` is not supported; only references to named structures are supported\n",
             "  in function `main`\n",
         )
     );
@@ -348,6 +456,88 @@ fn expected_omir() -> &'static str {
         "    %0 = neg copy %1\n",
         "    goto bb4\n",
         "  bb4:\n",
+        "    return\n",
+        "}\n",
+    )
+}
+
+#[test]
+fn builds_and_executes_the_exact_struct_method_artifact() {
+    let project = project_directory("struct-method");
+    let output = build(&project, &lua54_fixture("struct_method.rs"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read(artifact(&project)).unwrap(),
+        fs::read(lua54_expected("struct_method.lua")).unwrap()
+    );
+
+    let execution = Command::new("lua")
+        .arg(artifact(&project))
+        .output()
+        .expect("Lua 5.4.8 is required on PATH");
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(execution.stdout.is_empty());
+    assert!(execution.stderr.is_empty());
+    fs::remove_dir_all(project).unwrap();
+}
+
+fn expected_struct_omir() -> &'static str {
+    concat!(
+        "program entry @0\n",
+        "\n",
+        "struct @0 Point {\n",
+        "  .0 x: i32\n",
+        "  .1 y: i32\n",
+        "}\n",
+        "\n",
+        "fn @0 main() -> unit {\n",
+        "  locals:\n",
+        "    %0: unit return\n",
+        "    %1: struct @0 temporary\n",
+        "    %2: i32 temporary\n",
+        "    %3: &struct @0 temporary\n",
+        "  bb0:\n",
+        "    %1 = struct @0 { 20_i32, 22_i32 }\n",
+        "    %3 = borrow_shared %1\n",
+        "    %2 = call @1(copy %3) -> bb1 unwind continue\n",
+        "  bb1:\n",
+        "    return\n",
+        "}\n",
+        "\n",
+        "fn @1 verify(%1) -> i32 {\n",
+        "  locals:\n",
+        "    %0: i32 return\n",
+        "    %1: &struct @0 parameter\n",
+        "  bb0:\n",
+        "    %0 = call @2(copy %1) -> bb1 unwind continue\n",
+        "  bb1:\n",
+        "    return\n",
+        "}\n",
+        "\n",
+        "fn @2 Point::sum(%1) -> i32 {\n",
+        "  locals:\n",
+        "    %0: i32 return\n",
+        "    %1: &struct @0 parameter\n",
+        "    %2: i32 temporary\n",
+        "    %3: i32 temporary\n",
+        "    %4: i32 checked-value\n",
+        "    %5: bool checked-overflow\n",
+        "  bb0:\n",
+        "    %2 = copy (*%1).0\n",
+        "    %3 = copy (*%1).1\n",
+        "    (%4, %5) = checked_add copy %2, copy %3\n",
+        "    assert move %5 == false overflow_add(move %2, move %3) -> bb1 unwind continue\n",
+        "  bb1:\n",
+        "    %0 = move %4\n",
         "    return\n",
         "}\n",
     )

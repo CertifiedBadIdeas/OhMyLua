@@ -231,6 +231,29 @@ fn emit_expression(output: &mut String, expression: &LirExpression) {
             }
             output.push(')');
         }
+        LirExpression::Table { fields } => {
+            output.push('{');
+            for (index, field) in fields.iter().enumerate() {
+                if index != 0 {
+                    output.push_str(", ");
+                }
+                emit_expression(output, field);
+            }
+            output.push('}');
+        }
+        LirExpression::TableGet { table, index, .. } => {
+            match table.as_ref() {
+                LirExpression::Value(LirValue::Local(_)) | LirExpression::TableGet { .. } => {
+                    emit_expression(output, table)
+                }
+                _ => {
+                    output.push('(');
+                    emit_expression(output, table);
+                    output.push(')');
+                }
+            }
+            write!(output, "[{index}]").unwrap();
+        }
     }
 }
 
