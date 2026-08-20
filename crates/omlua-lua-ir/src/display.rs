@@ -33,6 +33,9 @@ impl fmt::Display for LirFunction {
             if local.parameter {
                 write!(formatter, " parameter")?;
             }
+            if local.addressable {
+                write!(formatter, " addressable")?;
+            }
             writeln!(formatter)?;
         }
         for block in &self.blocks {
@@ -65,6 +68,17 @@ impl fmt::Display for LirValueKind {
                 })?;
                 formatter.write_str(">")
             }
+            Self::Reference { kind, pointee } => {
+                write!(
+                    formatter,
+                    "{}{}",
+                    match kind {
+                        LirRefKind::Shared => "&",
+                        LirRefKind::Mutable => "&mut ",
+                    },
+                    pointee
+                )
+            }
         }
     }
 }
@@ -73,6 +87,20 @@ impl fmt::Display for LirStatement {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Assign { destination, value } => write!(formatter, "%{destination} = {value}"),
+            Self::Store { destination, value } => write!(formatter, "{destination} = {value}"),
+        }
+    }
+}
+
+impl fmt::Display for LirPlace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local(local) => write!(formatter, "%{local}"),
+            Self::TableField { table, index, .. } => write!(formatter, "{table}[{index}]"),
+            Self::EnumField { value, variant, field, .. } => {
+                write!(formatter, "{value}#{variant}.{field}")
+            }
+            Self::Deref { reference, .. } => write!(formatter, "*({reference})"),
         }
     }
 }
@@ -115,6 +143,17 @@ impl fmt::Display for LirExpression {
                 formatter,
                 "enum_field {value}#{variant}.{field} -> {result}"
             ),
+            Self::Reference { kind, place } => write!(
+                formatter,
+                "borrow_{} {place}",
+                match kind {
+                    LirRefKind::Shared => "shared",
+                    LirRefKind::Mutable => "mut",
+                }
+            ),
+            Self::DerefGet { reference, result } => {
+                write!(formatter, "deref_get {reference} -> {result}")
+            }
         }
     }
 }
@@ -134,6 +173,7 @@ impl fmt::Display for LirUnaryOp {
         formatter.write_str(match self {
             Self::Neg => "neg",
             Self::Not => "not",
+            Self::BitNot => "bit_not",
         })
     }
 }
@@ -161,6 +201,9 @@ impl fmt::Display for RuntimeHelper {
         formatter.write_str(match self {
             Self::I32DivTrunc => "i32_div_trunc",
             Self::I32Rem => "i32_rem",
+            Self::DeepCopy => "deep_copy",
+            Self::RefGet => "ref_get",
+            Self::RefSet => "ref_set",
         })
     }
 }
@@ -187,7 +230,7 @@ impl fmt::Display for LirTerminator {
                 target,
             } => {
                 if let Some(destination) = destination {
-                    write!(formatter, "%{destination} = ")?;
+                    write!(formatter, "{destination} = ")?;
                 }
                 write!(formatter, "call @{callee}(")?;
                 write_joined(formatter, arguments, |formatter, argument| {
@@ -271,11 +314,13 @@ mod tests {
                         id: return_local,
                         kind: LirValueKind::Integer,
                         parameter: false,
+                        addressable: false,
                     },
                     LirLocal {
                         id: parameter,
                         kind: LirValueKind::Integer,
                         parameter: true,
+                        addressable: false,
                     },
                 ],
                 blocks: vec![LirBlock {
@@ -346,21 +391,25 @@ mod tests {
                         id: return_local,
                         kind: LirValueKind::Integer,
                         parameter: false,
+                        addressable: false,
                     },
                     LirLocal {
                         id: parameter,
                         kind: LirValueKind::Enum(shapes.clone()),
                         parameter: true,
+                        addressable: false,
                     },
                     LirLocal {
                         id: tag_local,
                         kind: LirValueKind::Integer,
                         parameter: false,
+                        addressable: false,
                     },
                     LirLocal {
                         id: value_local,
                         kind: LirValueKind::Enum(shapes),
                         parameter: false,
+                        addressable: false,
                     },
                 ],
                 blocks: vec![LirBlock {

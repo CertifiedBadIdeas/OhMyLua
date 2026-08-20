@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use omlua_ir::{FieldId, OmEnum, OmField, OmStruct, OmType, OmVariant, TypeId, VariantId};
+use omlua_ir::{FieldId, OmEnum, OmField, OmStruct, OmType, OmVariant, RefKind, TypeId, VariantId};
 use rustc_hir::Mutability;
 use rustc_middle::ty::{self, IntTy, Ty, TyCtxt};
 use rustc_span::def_id::DefId;
@@ -44,36 +44,21 @@ impl TypeRegistry {
             ty::Adt(definition, arguments) if definition.is_enum() => self
                 .register_enum(tcx, definition.did(), arguments)
                 .map(OmType::Enum),
-            ty::Ref(_, inner, Mutability::Not) => {
-                let ty::Adt(definition, arguments) = inner.kind() else {
-                    return Err(LowerError::program(format!(
-                        "shared reference `{ty}` is not supported; only references to named structures are supported"
-                    )));
-                };
-                if !definition.is_struct() {
-                    return Err(LowerError::program(format!(
-                        "shared reference `{ty}` is not supported; only references to named structures are supported"
-                    )));
-                }
-                self.register_struct(tcx, definition.did(), arguments)
-                    .map(OmType::SharedRef)
+            ty::Ref(_, inner, mutability) => {
+                let inner = self.lower_type(tcx, *inner)?;
+                let target = inner.as_ref_target().ok_or_else(|| {
+                    LowerError::program(format!(
+                        "nested reference `{ty}` is not supported yet"
+                    ))
+                })?;
+                Ok(OmType::Ref {
+                    kind: match mutability {
+                        Mutability::Not => RefKind::Shared,
+                        Mutability::Mut => RefKind::Mutable,
+                    },
+                    target,
+                })
             }
-            ty::Ref(_, inner, Mutability::Mut) => match inner.kind() {
-                ty::Adt(definition, arguments)
-                    if definition.is_struct() && core_range_name(tcx, definition.did()).is_some() =>
-                {
-                    if !is_i32_range(arguments) {
-                        return Err(LowerError::program(format!(
-                            "range `{ty}` is not supported; only `Range<i32>` is supported"
-                        )));
-                    }
-                    self.register_range(tcx, definition.did(), arguments)
-                        .map(OmType::Struct)
-                }
-                _ => Err(LowerError::program(format!(
-                    "mutable reference `{ty}` is not supported"
-                ))),
-            },
             _ => Err(LowerError::program(format!("type `{ty}` is not supported"))),
         }
     }
@@ -170,14 +155,14 @@ impl TypeRegistry {
                     .map_err(|_| LowerError::program("field count exceeds OMIR limits"))?,
             );
             let field_ty = field.ty(tcx, arguments).skip_normalization();
-            if matches!(field_ty.kind(), ty::Ref(..)) {
+            let ty = self.lower_type(tcx, field_ty)?;
+            if matches!(ty, OmType::Ref { .. }) {
                 return Err(LowerError::program(format!(
                     "reference field `{}` in structure `{}` is not supported",
                     field.name,
                     tcx.def_path_str(def_id)
                 )));
             }
-            let ty = self.lower_type(tcx, field_ty)?;
             if ty == OmType::Unit {
                 return Err(LowerError::program(format!(
                     "unit field `{}` in structure `{}` is not supported",
@@ -226,6 +211,13 @@ impl TypeRegistry {
             );
             let field_ty = field.ty(tcx, arguments).skip_normalization();
             let ty = self.lower_type(tcx, field_ty)?;
+            if matches!(ty, OmType::Ref { .. }) {
+                return Err(LowerError::program(format!(
+                    "reference field `{}` in structure `{}` is not supported",
+                    field.name,
+                    tcx.def_path_str(def_id)
+                )));
+            }
             if ty == OmType::Unit {
                 return Err(LowerError::program(format!(
                     "unit field `{}` in structure `{}` is not supported",
@@ -304,7 +296,8 @@ impl TypeRegistry {
             for (field_index, field) in variant.fields.iter_enumerated() {
                 let field_id = FieldId::new(field_index.as_u32());
                 let field_ty = field.ty(tcx, arguments).skip_normalization();
-                if matches!(field_ty.kind(), ty::Ref(..)) {
+                let ty = self.lower_type(tcx, field_ty)?;
+                if matches!(ty, OmType::Ref { .. }) {
                     return Err(LowerError::program(format!(
                         "reference field `{}` in variant `{}` of enum `{}` is not supported",
                         field.name,
@@ -312,7 +305,6 @@ impl TypeRegistry {
                         tcx.def_path_str(def_id)
                     )));
                 }
-                let ty = self.lower_type(tcx, field_ty)?;
                 if ty == OmType::Unit {
                     return Err(LowerError::program(format!(
                         "unit field `{}` in variant `{}` of enum `{}` is not supported",

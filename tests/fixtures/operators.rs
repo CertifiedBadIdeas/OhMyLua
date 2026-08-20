@@ -6,6 +6,10 @@ fn arithmetic(left: i32, right: i32) -> i32 {
     divided % right
 }
 
+fn bit_not(value: i32) -> i32 {
+    !value
+}
+
 fn comparisons(left: i32, right: i32) -> bool {
     let equal = left == right;
     let not_equal = left != right;
@@ -19,5 +23,6 @@ fn comparisons(left: i32, right: i32) -> bool {
 
 fn main() {
     let _number = arithmetic(8, 2);
+    let _inverted = bit_not(1);
     let _condition = comparisons(1, 2);
 }

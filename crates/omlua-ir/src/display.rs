@@ -2,7 +2,8 @@ use std::fmt::{self, Write};
 
 use crate::{
     AssertKind, BinaryOp, CheckedBinaryOp, Constant, LocalKind, OmEnum, OmFunction, OmProgram,
-    OmStruct, OmType, Operand, ProjectElem, Rvalue, Statement, Terminator, UnaryOp, UnwindAction,
+    OmStruct, OmType, Operand, Place, ProjectElem, RefKind, RefTarget, Rvalue, Statement, Terminator,
+    UnaryOp, UnwindAction,
 };
 
 impl fmt::Display for OmProgram {
@@ -104,7 +105,24 @@ fn type_name(ty: OmType) -> String {
         OmType::I32 => "i32".to_owned(),
         OmType::Struct(id) => format!("struct @{id}"),
         OmType::Enum(id) => format!("enum @{id}"),
-        OmType::SharedRef(id) => format!("&struct @{id}"),
+        OmType::Ref { kind, target } => format!(
+            "{}{}",
+            match kind {
+                RefKind::Shared => "&",
+                RefKind::Mutable => "&mut ",
+            },
+            ref_target_name(target)
+        ),
+    }
+}
+
+fn ref_target_name(target: RefTarget) -> String {
+    match target {
+        RefTarget::Unit => "unit".to_owned(),
+        RefTarget::Bool => "bool".to_owned(),
+        RefTarget::I32 => "i32".to_owned(),
+        RefTarget::Struct(id) => format!("struct @{id}"),
+        RefTarget::Enum(id) => format!("enum @{id}"),
     }
 }
 
@@ -123,6 +141,9 @@ fn format_statement(statement: &Statement) -> String {
     match statement {
         Statement::Assign { destination, value } => {
             format!("%{destination} = {}", format_rvalue(value))
+        }
+        Statement::Store { destination, value } => {
+            format!("{} = {}", format_place(destination), format_rvalue(value))
         }
         Statement::CheckedBinary {
             value,
@@ -174,9 +195,14 @@ fn format_rvalue(value: &Rvalue) -> String {
         Rvalue::Discriminant { source } => {
             format!("discriminant {}", format_operand(source))
         }
-        Rvalue::SharedBorrow { source } => {
-            format!("borrow_shared {}", format_operand_without_mode(source))
-        }
+        Rvalue::Borrow { kind, source } => format!(
+            "borrow_{} {}",
+            match kind {
+                RefKind::Shared => "shared",
+                RefKind::Mutable => "mut",
+            },
+            format_place(source)
+        ),
     }
 }
 
@@ -214,7 +240,8 @@ fn format_terminator(terminator: &Terminator) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "%{destination} = call @{callee}({arguments}) -> bb{target} unwind {}",
+                "{} = call @{callee}({arguments}) -> bb{target} unwind {}",
+                format_place(destination),
                 unwind_name(*unwind)
             )
         }
@@ -271,12 +298,8 @@ fn format_operand(operand: &Operand) -> String {
     }
 }
 
-fn format_operand_without_mode(operand: &Operand) -> String {
-    match operand {
-        Operand::Constant(_) => format_operand(operand),
-        Operand::Copy(local) | Operand::Move(local) => format!("%{local}"),
-        Operand::Project { base, path, .. } => format_projected_place(*base, path),
-    }
+fn format_place(place: &Place) -> String {
+    format_projected_place(place.base, &place.path)
 }
 
 fn format_projected_place(base: crate::LocalId, path: &[ProjectElem]) -> String {
@@ -305,6 +328,7 @@ fn unary_name(op: UnaryOp) -> &'static str {
     match op {
         UnaryOp::Neg => "neg",
         UnaryOp::Not => "not",
+        UnaryOp::BitNot => "bit_not",
     }
 }
 

@@ -111,7 +111,11 @@ fn emits_and_validates_packed_tables() {
     );
 
     let mut scalar_index = table_program(1);
-    let LirStatement::Assign { value, .. } = &mut scalar_index.functions[0].blocks[0].statements[1];
+    let LirStatement::Assign { value, .. } =
+        &mut scalar_index.functions[0].blocks[0].statements[1]
+    else {
+        unreachable!()
+    };
     let LirExpression::TableGet { table, .. } = value else {
         unreachable!()
     };
@@ -133,7 +137,11 @@ fn emits_and_validates_packed_tables() {
 
     let mut wrong_result = table_program(1);
     wrong_result.functions[0].locals[1].kind = LirValueKind::Bool;
-    let LirStatement::Assign { value, .. } = &mut wrong_result.functions[0].blocks[0].statements[1];
+    let LirStatement::Assign { value, .. } =
+        &mut wrong_result.functions[0].blocks[0].statements[1]
+    else {
+        unreachable!()
+    };
     let LirExpression::TableGet { result, .. } = value else {
         unreachable!()
     };
@@ -155,6 +163,64 @@ fn reference_lua54_executes_division_and_remainder_with_rust_semantics() {
 #[test]
 fn reference_lua54_executes_calls_and_branches() {
     assert_success(&call_and_branch_program(), "42\n");
+}
+
+#[test]
+fn emits_and_executes_addressable_reference_cells_and_stores() {
+    let mut addressable = local_definition(0, LirValueKind::Integer, false);
+    addressable.addressable = true;
+    let reference_kind = LirValueKind::Reference {
+        kind: omlua_lua_ir::LirRefKind::Mutable,
+        pointee: Box::new(LirValueKind::Integer),
+    };
+    let mut program = program(vec![function(
+        0,
+        vec![
+            addressable,
+            local_definition(1, reference_kind, false),
+            local_definition(2, LirValueKind::Integer, false),
+        ],
+        Vec::new(),
+        Some(2),
+        vec![LirBlock {
+            id: block_id(0),
+            statements: vec![
+                assign(0, integer(10)),
+                assign(
+                    1,
+                    LirExpression::Reference {
+                        kind: omlua_lua_ir::LirRefKind::Mutable,
+                        place: Box::new(omlua_lua_ir::LirPlace::Local(local_id(0))),
+                    },
+                ),
+                LirStatement::Store {
+                    destination: omlua_lua_ir::LirPlace::Deref {
+                        reference: Box::new(local(1)),
+                        result: LirValueKind::Integer,
+                    },
+                    value: integer(42),
+                },
+                assign(
+                    2,
+                    LirExpression::DerefGet {
+                        reference: Box::new(local(1)),
+                        result: LirValueKind::Integer,
+                    },
+                ),
+            ],
+            terminator: LirTerminator::Return {
+                value: Some(local(2)),
+            },
+        }],
+    )]);
+    program.helpers = vec![RuntimeHelper::RefGet, RuntimeHelper::RefSet];
+
+    let source = emit_lua54(&program, &LuaBackendProfile::lua54()).unwrap();
+    assert!(source.contains("local v0 = {nil}"));
+    assert!(source.contains("v1 = {v0, 1, __omlua_ref = true}"));
+    assert!(source.contains("__omlua_ref_set(v1, 42)"));
+    assert!(source.contains("__omlua_ref_get(v1)"));
+    assert_success(&program, "42\n");
 }
 
 #[test]
@@ -232,7 +298,11 @@ fn emits_and_validates_enums() {
     );
 
     let mut non_enum_tag = enum_program(1, 0);
-    let LirStatement::Assign { value, .. } = &mut non_enum_tag.functions[0].blocks[0].statements[1];
+    let LirStatement::Assign { value, .. } =
+        &mut non_enum_tag.functions[0].blocks[0].statements[1]
+    else {
+        unreachable!()
+    };
     let LirExpression::EnumTag { value: base } = value else {
         unreachable!()
     };
@@ -246,7 +316,10 @@ fn emits_and_validates_enums() {
 
     let mut missing_variant = enum_program(1, 0);
     let LirStatement::Assign { value, .. } =
-        &mut missing_variant.functions[0].blocks[0].statements[2];
+        &mut missing_variant.functions[0].blocks[0].statements[2]
+    else {
+        unreachable!()
+    };
     let LirExpression::EnumField { variant, .. } = value else {
         unreachable!()
     };
@@ -259,7 +332,11 @@ fn emits_and_validates_enums() {
     );
 
     let mut beyond_shape = enum_program(1, 0);
-    let LirStatement::Assign { value, .. } = &mut beyond_shape.functions[0].blocks[0].statements[2];
+    let LirStatement::Assign { value, .. } =
+        &mut beyond_shape.functions[0].blocks[0].statements[2]
+    else {
+        unreachable!()
+    };
     let LirExpression::EnumField { field, .. } = value else {
         unreachable!()
     };
@@ -272,7 +349,11 @@ fn emits_and_validates_enums() {
     );
 
     let mut wrong_result = enum_program(1, 0);
-    let LirStatement::Assign { value, .. } = &mut wrong_result.functions[0].blocks[0].statements[2];
+    let LirStatement::Assign { value, .. } =
+        &mut wrong_result.functions[0].blocks[0].statements[2]
+    else {
+        unreachable!()
+    };
     let LirExpression::EnumField { result, .. } = value else {
         unreachable!()
     };
@@ -362,7 +443,7 @@ fn result_branch_omir() -> OmProgram {
                         terminator: Terminator::Call {
                             callee: FunctionId::new(1),
                             arguments: vec![Operand::Move(LocalId::new(1))],
-                            destination: LocalId::new(2),
+                            destination: omlua_ir::Place::local(LocalId::new(2)),
                             target: BlockId::new(1),
                             unwind: UnwindAction::Continue,
                         },
@@ -731,7 +812,7 @@ fn call_omir() -> OmProgram {
                         terminator: Terminator::Call {
                             callee: FunctionId::new(1),
                             arguments: vec![Operand::Constant(Constant::I32(41))],
-                            destination: LocalId::new(0),
+                            destination: omlua_ir::Place::local(LocalId::new(0)),
                             target: BlockId::new(1),
                             unwind: UnwindAction::Continue,
                         },
@@ -808,6 +889,9 @@ fn helper_program(helper: RuntimeHelper) -> LirProgram {
     let helpers = match helper {
         RuntimeHelper::I32DivTrunc => vec![RuntimeHelper::I32DivTrunc],
         RuntimeHelper::I32Rem => vec![RuntimeHelper::I32DivTrunc, RuntimeHelper::I32Rem],
+        RuntimeHelper::DeepCopy | RuntimeHelper::RefGet | RuntimeHelper::RefSet => {
+            panic!("helper_program only covers integer arithmetic helpers")
+        }
     };
     let mut program = program(vec![function(
         0,
@@ -868,7 +952,7 @@ fn call_and_branch_program() -> LirProgram {
                 terminator: LirTerminator::Call {
                     callee: function_id(1),
                     arguments: vec![local(1)],
-                    destination: Some(local_id(0)),
+                    destination: Some(omlua_lua_ir::LirPlace::Local(local_id(0))),
                     target: block_id(3),
                 },
             },
@@ -963,6 +1047,7 @@ fn local_definition(id: u32, kind: LirValueKind, parameter: bool) -> LirLocal {
         id: local_id(id),
         kind,
         parameter,
+        addressable: false,
     }
 }
 

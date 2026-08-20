@@ -1,9 +1,9 @@
-use std::fmt::Write;
+use std::{collections::BTreeSet, fmt::Write};
 
 use omlua_lua_backend::LuaBackendProfile;
 use omlua_lua_ir::{
-    LirBinaryOp, LirExpression, LirFunction, LirProgram, LirStatement, LirTerminator, LirUnaryOp,
-    LirValue, RuntimeHelper,
+    LirBinaryOp, LirExpression, LirFunction, LirLocalId, LirPlace, LirProgram, LirStatement,
+    LirTerminator, LirUnaryOp, LirValue, RuntimeHelper,
 };
 
 use crate::{CodegenError, validate::validate};
@@ -54,10 +54,39 @@ fn emit_helper(output: &mut String, helper: RuntimeHelper) {
              \x20 return a - __omlua_i32_div_trunc(a, b) * b\n\
              end\n\n",
         ),
+        RuntimeHelper::DeepCopy => output.push_str(
+            "local function __omlua_deep_copy(value)\n\
+             \x20 if type(value) ~= \"table\" or value.__omlua_ref then\n\
+             \x20   return value\n\
+             \x20 end\n\
+             \x20 local result = {}\n\
+             \x20 for i = 1, #value do\n\
+             \x20   result[i] = __omlua_deep_copy(value[i])\n\
+             \x20 end\n\
+             \x20 return result\n\
+             end\n\n",
+        ),
+        RuntimeHelper::RefGet => output.push_str(
+            "local function __omlua_ref_get(ref)\n\
+             \x20 return ref[1][ref[2]]\n\
+             end\n\n",
+        ),
+        RuntimeHelper::RefSet => output.push_str(
+            "local function __omlua_ref_set(ref, value)\n\
+             \x20 ref[1][ref[2]] = value\n\
+             end\n\n",
+        ),
     }
 }
 
 fn emit_function(output: &mut String, function: &LirFunction) {
+    let addressable: BTreeSet<_> = function
+        .locals
+        .iter()
+        .filter(|local| local.addressable)
+        .map(|local| local.id)
+        .collect();
+
     write!(output, "f{} = function(", function.id.index()).unwrap();
     for (index, parameter) in function.parameters.iter().enumerate() {
         if index != 0 {
@@ -67,20 +96,34 @@ fn emit_function(output: &mut String, function: &LirFunction) {
     }
     output.push_str(")\n");
 
-    let locals: Vec<_> = function
+    let ordinary_locals: Vec<_> = function
         .locals
         .iter()
-        .filter(|local| !local.parameter)
+        .filter(|local| !local.parameter && !local.addressable)
         .collect();
-    if !locals.is_empty() {
+    if !ordinary_locals.is_empty() {
         output.push_str("  local ");
-        for (index, local) in locals.iter().enumerate() {
+        for (index, local) in ordinary_locals.iter().enumerate() {
             if index != 0 {
                 output.push_str(", ");
             }
             write!(output, "v{}", local.id.index()).unwrap();
         }
         output.push('\n');
+    }
+    for local in function
+        .locals
+        .iter()
+        .filter(|local| !local.parameter && local.addressable)
+    {
+        writeln!(output, "  local v{} = {{nil}}", local.id.index()).unwrap();
+    }
+    for local in function
+        .locals
+        .iter()
+        .filter(|local| local.parameter && local.addressable)
+    {
+        writeln!(output, "  v{} = {{v{}}}", local.id.index(), local.id.index()).unwrap();
     }
     writeln!(output, "  goto bb{}", function.entry.index()).unwrap();
 
@@ -90,19 +133,28 @@ fn emit_function(output: &mut String, function: &LirFunction) {
         for statement in &block.statements {
             match statement {
                 LirStatement::Assign { destination, value } => {
-                    write!(output, "    v{} = ", destination.index()).unwrap();
-                    emit_expression(output, value);
+                    output.push_str("    ");
+                    emit_local_lvalue(output, *destination, &addressable);
+                    output.push_str(" = ");
+                    emit_expression(output, value, &addressable);
                     output.push('\n');
+                }
+                LirStatement::Store { destination, value } => {
+                    emit_store(output, destination, value, &addressable, "    ");
                 }
             }
         }
-        emit_terminator(output, &block.terminator);
+        emit_terminator(output, &block.terminator, &addressable);
         output.push_str("  end\n");
     }
     output.push_str("end\n\n");
 }
 
-fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
+fn emit_terminator(
+    output: &mut String,
+    terminator: &LirTerminator,
+    addressable: &BTreeSet<LirLocalId>,
+) {
     match terminator {
         LirTerminator::Jump { target } => {
             writeln!(output, "    goto bb{}", target.index()).unwrap();
@@ -114,7 +166,7 @@ fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
         } => {
             for (index, (value, target)) in targets.iter().enumerate() {
                 output.push_str(if index == 0 { "    if " } else { "    elseif " });
-                emit_expression(output, discriminant);
+                emit_expression(output, discriminant, addressable);
                 output.push_str(" == ");
                 emit_integer(output, *value);
                 output.push_str(" then\n");
@@ -135,17 +187,25 @@ fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
             target,
         } => {
             output.push_str("    ");
-            if let Some(destination) = destination {
-                write!(output, "v{} = ", destination.index()).unwrap();
-            }
-            write!(output, "f{}(", callee.index()).unwrap();
-            for (index, argument) in arguments.iter().enumerate() {
-                if index != 0 {
+            match destination {
+                Some(LirPlace::Deref { reference, .. }) => {
+                    output.push_str("__omlua_ref_set(");
+                    emit_expression(output, reference, addressable);
                     output.push_str(", ");
+                    emit_call(output, *callee, arguments, addressable);
+                    output.push_str(")\n");
                 }
-                emit_expression(output, argument);
+                Some(destination) => {
+                    emit_place_lvalue(output, destination, addressable);
+                    output.push_str(" = ");
+                    emit_call(output, *callee, arguments, addressable);
+                    output.push('\n');
+                }
+                None => {
+                    emit_call(output, *callee, arguments, addressable);
+                    output.push('\n');
+                }
             }
-            output.push_str(")\n");
             writeln!(output, "    goto bb{}", target.index()).unwrap();
         }
         LirTerminator::Branch {
@@ -154,7 +214,7 @@ fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
             if_false,
         } => {
             output.push_str("    if ");
-            emit_expression(output, condition);
+            emit_expression(output, condition, addressable);
             output.push_str(" then\n");
             writeln!(output, "      goto bb{}", if_true.index()).unwrap();
             output.push_str("    else\n");
@@ -165,7 +225,7 @@ fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
             output.push_str("    return");
             if let Some(value) = value {
                 output.push(' ');
-                emit_expression(output, value);
+                emit_expression(output, value, addressable);
             }
             output.push('\n');
         }
@@ -180,11 +240,122 @@ fn emit_terminator(output: &mut String, terminator: &LirTerminator) {
     }
 }
 
-fn emit_expression(output: &mut String, expression: &LirExpression) {
-    match expression {
-        LirExpression::Value(LirValue::Local(id)) => {
-            write!(output, "v{}", id.index()).unwrap();
+fn emit_call(
+    output: &mut String,
+    callee: omlua_lua_ir::LirFunctionId,
+    arguments: &[LirExpression],
+    addressable: &BTreeSet<LirLocalId>,
+) {
+    write!(output, "f{}(", callee.index()).unwrap();
+    for (index, argument) in arguments.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
         }
+        emit_expression(output, argument, addressable);
+    }
+    output.push(')');
+}
+
+fn emit_store(
+    output: &mut String,
+    destination: &LirPlace,
+    value: &LirExpression,
+    addressable: &BTreeSet<LirLocalId>,
+    indent: &str,
+) {
+    output.push_str(indent);
+    match destination {
+        LirPlace::Deref { reference, .. } => {
+            output.push_str("__omlua_ref_set(");
+            emit_expression(output, reference, addressable);
+            output.push_str(", ");
+            emit_expression(output, value, addressable);
+            output.push_str(")\n");
+        }
+        _ => {
+            emit_place_lvalue(output, destination, addressable);
+            output.push_str(" = ");
+            emit_expression(output, value, addressable);
+            output.push('\n');
+        }
+    }
+}
+
+fn emit_local_read(
+    output: &mut String,
+    id: LirLocalId,
+    addressable: &BTreeSet<LirLocalId>,
+) {
+    write!(output, "v{}", id.index()).unwrap();
+    if addressable.contains(&id) {
+        output.push_str("[1]");
+    }
+}
+
+fn emit_local_lvalue(
+    output: &mut String,
+    id: LirLocalId,
+    addressable: &BTreeSet<LirLocalId>,
+) {
+    emit_local_read(output, id, addressable);
+}
+
+fn emit_place_lvalue(
+    output: &mut String,
+    place: &LirPlace,
+    addressable: &BTreeSet<LirLocalId>,
+) {
+    match place {
+        LirPlace::Local(id) => emit_local_lvalue(output, *id, addressable),
+        LirPlace::TableField { table, index, .. } => {
+            emit_indexable_base(output, table, addressable);
+            write!(output, "[{index}]").unwrap();
+        }
+        LirPlace::EnumField { value, field, .. } => {
+            emit_indexable_base(output, value, addressable);
+            write!(output, "[{}]", field + 2).unwrap();
+        }
+        LirPlace::Deref { .. } => {
+            unreachable!("dereference stores are emitted through __omlua_ref_set")
+        }
+    }
+}
+
+fn emit_reference(
+    output: &mut String,
+    place: &LirPlace,
+    addressable: &BTreeSet<LirLocalId>,
+) {
+    match place {
+        LirPlace::Local(id) => {
+            debug_assert!(addressable.contains(id));
+            write!(output, "{{v{}, 1, __omlua_ref = true}}", id.index()).unwrap();
+        }
+        LirPlace::TableField { table, index, .. } => {
+            output.push('{');
+            emit_expression(output, table, addressable);
+            write!(output, ", {index}, __omlua_ref = true}}").unwrap();
+        }
+        LirPlace::EnumField { value, field, .. } => {
+            output.push('{');
+            emit_expression(output, value, addressable);
+            write!(output, ", {}, __omlua_ref = true}}", field + 2).unwrap();
+        }
+        LirPlace::Deref { reference, .. } => {
+            // &*r is the same address as r. Reusing the descriptor also preserves
+            // reference identity when a reborrow is stored in another aggregate.
+            emit_expression(output, reference, addressable);
+        }
+    }
+}
+
+fn emit_expression(
+    output: &mut String,
+    expression: &LirExpression,
+    addressable: &BTreeSet<LirLocalId>,
+) {
+    match expression {
+        LirExpression::Value(LirValue::Local(id)) => emit_local_read(output, *id, addressable),
         LirExpression::Value(LirValue::Bool(value)) => {
             output.push_str(if *value { "true" } else { "false" })
         }
@@ -194,13 +365,14 @@ fn emit_expression(output: &mut String, expression: &LirExpression) {
             output.push_str(match op {
                 LirUnaryOp::Neg => "-",
                 LirUnaryOp::Not => "not ",
+                LirUnaryOp::BitNot => "~",
             });
-            emit_expression(output, operand);
+            emit_expression(output, operand, addressable);
             output.push(')');
         }
         LirExpression::Binary { op, left, right } => {
             output.push('(');
-            emit_expression(output, left);
+            emit_expression(output, left, addressable);
             output.push_str(match op {
                 LirBinaryOp::And => " and ",
                 LirBinaryOp::Or => " or ",
@@ -214,20 +386,23 @@ fn emit_expression(output: &mut String, expression: &LirExpression) {
                 LirBinaryOp::Gt => " > ",
                 LirBinaryOp::Ge => " >= ",
             });
-            emit_expression(output, right);
+            emit_expression(output, right, addressable);
             output.push(')');
         }
         LirExpression::RuntimeCall { helper, arguments } => {
             output.push_str(match helper {
                 RuntimeHelper::I32DivTrunc => "__omlua_i32_div_trunc",
                 RuntimeHelper::I32Rem => "__omlua_i32_rem",
+                RuntimeHelper::DeepCopy => "__omlua_deep_copy",
+                RuntimeHelper::RefGet => "__omlua_ref_get",
+                RuntimeHelper::RefSet => "__omlua_ref_set",
             });
             output.push('(');
             for (index, argument) in arguments.iter().enumerate() {
                 if index != 0 {
                     output.push_str(", ");
                 }
-                emit_expression(output, argument);
+                emit_expression(output, argument, addressable);
             }
             output.push(')');
         }
@@ -237,12 +412,12 @@ fn emit_expression(output: &mut String, expression: &LirExpression) {
                 if index != 0 {
                     output.push_str(", ");
                 }
-                emit_expression(output, field);
+                emit_expression(output, field, addressable);
             }
             output.push('}');
         }
         LirExpression::TableGet { table, index, .. } => {
-            emit_indexable_base(output, table);
+            emit_indexable_base(output, table, addressable);
             write!(output, "[{index}]").unwrap();
         }
         LirExpression::Enum { tag, fields, .. } => {
@@ -250,30 +425,41 @@ fn emit_expression(output: &mut String, expression: &LirExpression) {
             emit_integer(output, i64::from(*tag));
             for field in fields {
                 output.push_str(", ");
-                emit_expression(output, field);
+                emit_expression(output, field, addressable);
             }
             output.push('}');
         }
         LirExpression::EnumTag { value } => {
-            emit_indexable_base(output, value);
+            emit_indexable_base(output, value, addressable);
             output.push_str("[1]");
         }
         LirExpression::EnumField { value, field, .. } => {
-            emit_indexable_base(output, value);
+            emit_indexable_base(output, value, addressable);
             write!(output, "[{}]", field + 2).unwrap();
+        }
+        LirExpression::Reference { place, .. } => emit_reference(output, place, addressable),
+        LirExpression::DerefGet { reference, .. } => {
+            output.push_str("__omlua_ref_get(");
+            emit_expression(output, reference, addressable);
+            output.push(')');
         }
     }
 }
 
-fn emit_indexable_base(output: &mut String, value: &LirExpression) {
+fn emit_indexable_base(
+    output: &mut String,
+    value: &LirExpression,
+    addressable: &BTreeSet<LirLocalId>,
+) {
     match value {
         LirExpression::Value(LirValue::Local(_))
         | LirExpression::TableGet { .. }
         | LirExpression::EnumTag { .. }
-        | LirExpression::EnumField { .. } => emit_expression(output, value),
+        | LirExpression::EnumField { .. }
+        | LirExpression::DerefGet { .. } => emit_expression(output, value, addressable),
         _ => {
             output.push('(');
-            emit_expression(output, value);
+            emit_expression(output, value, addressable);
             output.push(')');
         }
     }

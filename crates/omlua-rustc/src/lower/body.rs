@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use omlua_ir::{
     AssertKind, BinaryOp, BlockId, CheckedBinaryOp, Constant, FieldId, FunctionId, LocalId,
-    LocalKind, OmBlock, OmFunction, OmLocal, OmType, Operand, ProjectElem, Rvalue, Statement,
-    SwitchValue, Terminator, TypeId, UnaryOp, UnwindAction, VariantId,
+    LocalKind, OmBlock, OmFunction, OmLocal, OmType, Operand, Place as OmPlace, ProjectElem,
+    RefKind, Rvalue, Statement, SwitchValue, Terminator, TypeId, UnaryOp, UnwindAction, VariantId,
 };
 use rustc_index::Idx;
 use rustc_middle::mir::{
@@ -51,7 +51,6 @@ struct BodyLowerer<'a, 'tcx> {
     registry: &'a mut FunctionRegistry,
     locals: Vec<OmLocal>,
     local_map: Vec<LocalMapping>,
-    range_aliases: HashMap<LocalId, LocalId>,
     synthetic_blocks: Vec<OmBlock>,
     next_synthetic_block: u32,
 }
@@ -122,7 +121,6 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
             registry,
             locals,
             local_map,
-            range_aliases: HashMap::new(),
             synthetic_blocks: Vec::new(),
             next_synthetic_block,
         })
@@ -184,9 +182,6 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         match kind {
             StatementKind::Assign(assignment) => {
                 let (place, value) = &**assignment;
-                if let Some(statement) = self.lower_mutable_range_borrow(block, place, value)? {
-                    return Ok(Some(statement));
-                }
                 if let Some(op) = checked_binary(value) {
                     let LocalMapping::CheckedPair {
                         value: destination,
@@ -210,14 +205,20 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                     }));
                 }
 
-                Ok(Some(Statement::Assign {
-                    destination: self.lower_place(block, place)?,
-                    value: self.lower_rvalue(
-                        block,
+                let destination = self.lower_place(block, place)?;
+                let value = self.lower_rvalue(
+                    block,
+                    value,
+                    place.ty(&self.body.local_decls, self.tcx).ty,
+                )?;
+                if destination.path.is_empty() {
+                    Ok(Some(Statement::Assign {
+                        destination: destination.base,
                         value,
-                        place.ty(&self.body.local_decls, self.tcx).ty,
-                    )?,
-                }))
+                    }))
+                } else {
+                    Ok(Some(Statement::Store { destination, value }))
+                }
             }
             StatementKind::StorageLive(_) | StatementKind::StorageDead(_) | StatementKind::Nop => {
                 Ok(None)
@@ -239,12 +240,20 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
             MirRvalue::Discriminant(place) => Ok(Rvalue::Discriminant {
                 source: self.lower_operand_place(block, place, false)?,
             }),
-            MirRvalue::UnaryOp(op, operand) => Ok(Rvalue::Unary {
-                op: lower_unary(*op).ok_or_else(|| {
-                    self.block_error(block, format!("unary operation `{op:?}` is not supported"))
-                })?,
-                operand: self.lower_operand(block, operand)?,
-            }),
+            MirRvalue::UnaryOp(op, operand) => {
+                let operand_ty = operand.ty(&self.body.local_decls, self.tcx);
+                Ok(Rvalue::Unary {
+                    op: lower_unary(*op, operand_ty).ok_or_else(|| {
+                        self.block_error(
+                            block,
+                            format!(
+                                "unary operation `{op:?}` is not supported for `{operand_ty}`"
+                            ),
+                        )
+                    })?,
+                    operand: self.lower_operand(block, operand)?,
+                })
+            }
             MirRvalue::BinaryOp(op, operands) => Ok(Rvalue::Binary {
                 op: lower_binary(
                     *op,
@@ -291,13 +300,37 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                 }
             }
             MirRvalue::Ref(_, borrow_kind, place) => {
-                if !matches!(borrow_kind, BorrowKind::Shared) {
-                    return Err(
-                        self.block_error(block, "only shared structure borrows are supported")
-                    );
+                let kind = match borrow_kind {
+                    BorrowKind::Shared => RefKind::Shared,
+                    BorrowKind::Mut { .. } => RefKind::Mutable,
+                    other => {
+                        return Err(self.block_error(
+                            block,
+                            format!("borrow kind `{other:?}` is not supported"),
+                        ));
+                    }
+                };
+                let source = self.lower_place(block, place)?;
+                let source_ty = self.om_place_type(&source)?;
+                let expected = self
+                    .registry
+                    .types
+                    .lower_type(self.tcx, destination_ty)
+                    .map_err(|error| self.block_error(block, error.detail()))?;
+                let OmType::Ref {
+                    kind: expected_kind,
+                    target,
+                } = expected
+                else {
+                    return Err(self.block_error(block, "borrow destination is not a reference"));
+                };
+                if expected_kind != kind || target.as_type() != source_ty {
+                    return Err(self.block_error(
+                        block,
+                        "borrow source and destination reference types do not match",
+                    ));
                 }
-                let source = self.lower_shared_borrow_source(block, place)?;
-                Ok(Rvalue::SharedBorrow { source })
+                Ok(Rvalue::Borrow { kind, source })
             }
             other => {
                 Err(self.block_error(block, format!("MIR rvalue `{other:?}` is not supported")))
@@ -354,54 +387,59 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         place: &Place<'tcx>,
         moved: bool,
     ) -> Result<Operand, LowerError> {
-        if matches!(
-            self.local_map[place.local.index()],
-            LocalMapping::CheckedPair { .. }
-        ) {
-            let local = self.lower_place(block, place)?;
+        let place = self.lower_place(block, place)?;
+        if place.path.is_empty() {
             return Ok(if moved {
-                Operand::Move(local)
+                Operand::Move(place.base)
             } else {
-                Operand::Copy(local)
+                Operand::Copy(place.base)
             });
+        }
+        Ok(Operand::Project {
+            base: place.base,
+            path: place.path,
+            moved,
+        })
+    }
+
+    fn lower_place(&self, block: BasicBlock, place: &Place<'tcx>) -> Result<OmPlace, LowerError> {
+        if let LocalMapping::CheckedPair { value, overflow } = self.local_map[place.local.index()] {
+            return match place.projection.as_ref() {
+                [PlaceElem::Field(field, _)] if field.index() == 0 => Ok(OmPlace::local(value)),
+                [PlaceElem::Field(field, _)] if field.index() == 1 => Ok(OmPlace::local(overflow)),
+                _ => Err(self.block_error(
+                    block,
+                    "compiler-generated checked pair is only addressable through fields .0 and .1",
+                )),
+            };
         }
 
         let LocalMapping::Scalar(base) = self.local_map[place.local.index()] else {
             unreachable!()
         };
-        if place.projection.is_empty() {
-            return Ok(if moved {
-                Operand::Move(base)
-            } else {
-                Operand::Copy(base)
-            });
-        }
-
         let mut ty = self.locals[base.index() as usize].ty;
         let mut path = Vec::new();
         let mut downcast: Option<VariantId> = None;
         for projection in place.projection.as_ref() {
             match projection {
                 PlaceElem::Deref => {
-                    let OmType::SharedRef(id) = ty else {
-                        return Err(self.block_error(
-                            block,
-                            "dereference of a non-shared-structure reference is not supported",
-                        ));
+                    let OmType::Ref { target, .. } = ty else {
+                        return Err(self.block_error(block, "dereference of a non-reference value"));
                     };
-                    ty = OmType::Struct(id);
+                    ty = target.as_type();
                     path.push(ProjectElem::Deref);
                 }
                 PlaceElem::Downcast(_name, variant) => {
                     if downcast.is_some() {
-                        return Err(self.block_error(block, "nested downcast without a field read"));
+                        return Err(self.block_error(block, "nested downcast without a field access"));
                     }
                     let OmType::Enum(type_id) = ty else {
                         return Err(self.block_error(block, "downcast of a non-enum value"));
                     };
-                    self.validate_variant(block, type_id, VariantId::new(variant.as_u32()))?;
-                    downcast = Some(VariantId::new(variant.as_u32()));
-                    path.push(ProjectElem::Downcast(VariantId::new(variant.as_u32())));
+                    let variant = VariantId::new(variant.as_u32());
+                    self.validate_variant(block, type_id, variant)?;
+                    downcast = Some(variant);
+                    path.push(ProjectElem::Downcast(variant));
                 }
                 PlaceElem::Field(field, _) => {
                     let definition_field = match (ty, downcast) {
@@ -418,9 +456,7 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                             ));
                         }
                         _ => {
-                            return Err(
-                                self.block_error(block, "field access on a non-structure value")
-                            );
+                            return Err(self.block_error(block, "field access on a non-aggregate value"));
                         }
                     };
                     path.push(ProjectElem::Field(FieldId::new(field.as_u32())));
@@ -436,139 +472,89 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
             }
         }
         if downcast.is_some() {
-            return Err(self.block_error(block, "enum downcast without a field read"));
+            return Err(self.block_error(block, "enum downcast without a field access"));
         }
-        Ok(Operand::Project { base, path, moved })
+        Ok(OmPlace { base, path })
     }
 
-    fn lower_shared_borrow_source(
-        &self,
-        block: BasicBlock,
-        place: &Place<'tcx>,
-    ) -> Result<Operand, LowerError> {
-        let source = self.lower_operand_place(block, place, false)?;
-        if !matches!(self.om_operand_type(&source)?, OmType::Struct(_)) {
-            return Err(self.block_error(block, "shared borrow source is not a structure"));
-        }
-        Ok(source)
-    }
-
-    fn om_operand_type(&self, operand: &Operand) -> Result<OmType, LowerError> {
-        match operand {
-            Operand::Copy(local) | Operand::Move(local) => {
-                Ok(self.locals[local.index() as usize].ty)
-            }
-            Operand::Project { base, path, .. } => {
-                let mut ty = self.locals[base.index() as usize].ty;
-                let mut downcast: Option<VariantId> = None;
-                for element in path {
-                    match element {
-                        ProjectElem::Deref => {
-                            let OmType::SharedRef(id) = ty else {
-                                return Err(LowerError::function(
-                                    &self.name,
-                                    "dereference source is not a shared structure reference",
-                                ));
-                            };
-                            ty = OmType::Struct(id);
-                        }
-                        ProjectElem::Downcast(variant) => {
-                            let OmType::Enum(_) = ty else {
-                                return Err(LowerError::function(
-                                    &self.name,
-                                    "downcast crosses a non-enum value",
-                                ));
-                            };
-                            downcast = Some(*variant);
-                        }
-                        ProjectElem::Field(field) => {
-                            let definition_field = match (ty, downcast) {
-                                (OmType::Struct(type_id), None) => self
-                                    .registry
-                                    .types
-                                    .definition(type_id)
-                                    .and_then(|definition| definition.fields.get(field.index() as usize))
-                                    .filter(|definition| definition.id == *field)
-                                    .ok_or_else(|| {
-                                        LowerError::function(
-                                            &self.name,
-                                            format!(
-                                                "field .{field} does not exist in structure @{type_id}"
-                                            ),
-                                        )
-                                    })?,
-                                (OmType::Enum(type_id), Some(variant)) => self
-                                    .registry
-                                    .types
-                                    .enum_definition(type_id)
-                                    .and_then(|definition| definition.variants.get(variant.index() as usize))
-                                    .filter(|definition| definition.id == variant)
-                                    .and_then(|variant| variant.fields.get(field.index() as usize))
-                                    .filter(|definition| definition.id == *field)
-                                    .ok_or_else(|| {
-                                        LowerError::function(
-                                            &self.name,
-                                            format!(
-                                                "field .{field} does not exist in variant v{variant} of enum @{type_id}"
-                                            ),
-                                        )
-                                    })?,
-                                (OmType::Enum(_), None) => {
-                                    return Err(LowerError::function(
-                                        &self.name,
-                                        "enum field access requires a variant downcast",
-                                    ));
-                                }
-                                _ => {
-                                    return Err(LowerError::function(
-                                        &self.name,
-                                        "field projection crosses a non-structure value",
-                                    ));
-                                }
-                            };
-                            ty = definition_field.ty;
-                            downcast = None;
-                        }
-                    }
+    fn om_place_type(&self, place: &OmPlace) -> Result<OmType, LowerError> {
+        let mut ty = self.locals[place.base.index() as usize].ty;
+        let mut downcast: Option<VariantId> = None;
+        for element in &place.path {
+            match element {
+                ProjectElem::Deref => {
+                    let OmType::Ref { target, .. } = ty else {
+                        return Err(LowerError::function(
+                            &self.name,
+                            "dereference source is not a reference",
+                        ));
+                    };
+                    ty = target.as_type();
                 }
-                if downcast.is_some() {
-                    return Err(LowerError::function(
-                        &self.name,
-                        "projection ends with a downcast without a field read",
-                    ));
+                ProjectElem::Downcast(variant) => {
+                    let OmType::Enum(_) = ty else {
+                        return Err(LowerError::function(
+                            &self.name,
+                            "downcast crosses a non-enum value",
+                        ));
+                    };
+                    downcast = Some(*variant);
                 }
-                Ok(ty)
+                ProjectElem::Field(field) => {
+                    let definition_field = match (ty, downcast) {
+                        (OmType::Struct(type_id), None) => self
+                            .registry
+                            .types
+                            .definition(type_id)
+                            .and_then(|definition| definition.fields.get(field.index() as usize))
+                            .filter(|definition| definition.id == *field)
+                            .ok_or_else(|| {
+                                LowerError::function(
+                                    &self.name,
+                                    format!("field .{field} does not exist in structure @{type_id}"),
+                                )
+                            })?,
+                        (OmType::Enum(type_id), Some(variant)) => self
+                            .registry
+                            .types
+                            .enum_definition(type_id)
+                            .and_then(|definition| definition.variants.get(variant.index() as usize))
+                            .filter(|definition| definition.id == variant)
+                            .and_then(|variant| variant.fields.get(field.index() as usize))
+                            .filter(|definition| definition.id == *field)
+                            .ok_or_else(|| {
+                                LowerError::function(
+                                    &self.name,
+                                    format!(
+                                        "field .{field} does not exist in variant v{variant} of enum @{type_id}"
+                                    ),
+                                )
+                            })?,
+                        (OmType::Enum(_), None) => {
+                            return Err(LowerError::function(
+                                &self.name,
+                                "enum field access requires a variant downcast",
+                            ));
+                        }
+                        _ => {
+                            return Err(LowerError::function(
+                                &self.name,
+                                "field projection crosses a non-aggregate value",
+                            ));
+                        }
+                    };
+                    ty = definition_field.ty;
+                    downcast = None;
+                }
             }
-            Operand::Constant(Constant::Unit) => Ok(OmType::Unit),
-            Operand::Constant(Constant::Bool(_)) => Ok(OmType::Bool),
-            Operand::Constant(Constant::I32(_)) => Ok(OmType::I32),
         }
-    }
-
-    fn lower_place(&self, block: BasicBlock, place: &Place<'tcx>) -> Result<LocalId, LowerError> {
-        match (
-            self.local_map[place.local.index()],
-            place.projection.as_ref(),
-        ) {
-            (LocalMapping::Scalar(id), []) => Ok(id),
-            (LocalMapping::CheckedPair { value, .. }, [PlaceElem::Field(field, _)])
-                if field.index() == 0 =>
-            {
-                Ok(value)
-            }
-            (LocalMapping::CheckedPair { overflow, .. }, [PlaceElem::Field(field, _)])
-                if field.index() == 1 =>
-            {
-                Ok(overflow)
-            }
-            _ => Err(self.block_error(
-                block,
-                format!(
-                    "place projection on local _{} is not supported",
-                    place.local.index()
-                ),
-            )),
+        if downcast.is_some() {
+            return Err(LowerError::function(
+                &self.name,
+                "projection ends with a downcast without a field access",
+            ));
         }
+        Ok(ty)
     }
 
     fn mapping_for_bare_place(
@@ -590,44 +576,6 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                 format!("local _{} cannot be used as a scalar", local.index()),
             )),
         }
-    }
-
-    fn lower_mutable_range_borrow(
-        &mut self,
-        block: BasicBlock,
-        place: &Place<'tcx>,
-        value: &MirRvalue<'tcx>,
-    ) -> Result<Option<Statement>, LowerError> {
-        let MirRvalue::Ref(_, borrow_kind, source) = value else {
-            return Ok(None);
-        };
-        if !matches!(borrow_kind, BorrowKind::Mut { .. }) {
-            return Ok(None);
-        }
-        let ty::Adt(definition, _) = source.ty(&self.body.local_decls, self.tcx).ty.kind() else {
-            return Ok(None);
-        };
-        if !core_range_name(self.tcx, definition.did()).is_some_and(|name| name == "Range") {
-            return Ok(None);
-        }
-        let LocalMapping::Scalar(destination) = self.local_map[place.local.index()] else {
-            return Err(self.block_error(
-                block,
-                "iterator borrow destination is not a scalar local",
-            ));
-        };
-        if !place.projection.is_empty() {
-            return Err(self.block_error(block, "iterator borrow destination has a projection"));
-        }
-        let source = self.lower_operand_place(block, source, false)?;
-        let (Operand::Copy(base) | Operand::Move(base)) = source else {
-            return Err(self.block_error(block, "iterator borrow source is not a local"));
-        };
-        self.range_aliases.insert(destination, base);
-        Ok(Some(Statement::Assign {
-            destination,
-            value: Rvalue::Use(Operand::Copy(base)),
-        }))
     }
 
     fn try_lower_range_next(
@@ -664,21 +612,27 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         let (MirOperand::Copy(place) | MirOperand::Move(place)) = &iterator.node else {
             return Err(self.block_error(block, "iterator `next` argument is not a local"));
         };
+        if !place.projection.is_empty() {
+            return Err(self.block_error(block, "iterator `next` argument has a projection"));
+        }
         let LocalMapping::Scalar(iterator_local) = self.local_map[place.local.index()] else {
             return Err(self.block_error(block, "iterator `next` argument is not a scalar local"));
         };
-        let Some(&base) = self.range_aliases.get(&iterator_local) else {
-            return Err(self.block_error(
-                block,
-                "iterator `next` call has no matching `&mut` borrow in the same block",
-            ));
+        let OmType::Ref {
+            kind: RefKind::Mutable,
+            target: omlua_ir::RefTarget::Struct(_range_id),
+        } = self.locals[iterator_local.index() as usize].ty
+        else {
+            return Err(self.block_error(block, "iterator `next` argument is not `&mut Range<i32>`"));
         };
+
         let destination = self.lower_place(block, destination)?;
+        if !destination.path.is_empty() {
+            return Err(self.block_error(block, "iterator `next` destination has a projection"));
+        }
+        let destination = destination.base;
         let target = target.ok_or_else(|| self.block_error(block, "diverging calls are not supported"))?;
         let target = block_id(target, &self.name)?;
-        let OmType::Struct(range_id) = self.locals[base.index() as usize].ty else {
-            return Err(self.block_error(block, "iterator base is not a range structure"));
-        };
         let OmType::Enum(option_id) = self.locals[destination.index() as usize].ty else {
             return Err(self.block_error(block, "iterator `next` destination is not an option"));
         };
@@ -687,21 +641,23 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         let end = push_local(&mut self.locals, OmType::I32, LocalKind::Temporary, &self.name)?;
         let has_next = push_local(&mut self.locals, OmType::Bool, LocalKind::Temporary, &self.name)?;
         let advanced = push_local(&mut self.locals, OmType::I32, LocalKind::Temporary, &self.name)?;
+        let start_path = vec![ProjectElem::Deref, ProjectElem::Field(FieldId::new(0))];
+        let end_path = vec![ProjectElem::Deref, ProjectElem::Field(FieldId::new(1))];
 
         let statements = vec![
             Statement::Assign {
                 destination: start,
                 value: Rvalue::Use(Operand::Project {
-                    base,
-                    path: vec![ProjectElem::Field(FieldId::new(0))],
+                    base: iterator_local,
+                    path: start_path.clone(),
                     moved: false,
                 }),
             },
             Statement::Assign {
                 destination: end,
                 value: Rvalue::Use(Operand::Project {
-                    base,
-                    path: vec![ProjectElem::Field(FieldId::new(1))],
+                    base: iterator_local,
+                    path: end_path,
                     moved: false,
                 }),
             },
@@ -715,7 +671,18 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
             },
         ];
 
-        let none_block = self.push_synthetic_block(block, Vec::new(), Terminator::Goto { target })?;
+        let none_block = self.push_synthetic_block(
+            block,
+            vec![Statement::Assign {
+                destination,
+                value: Rvalue::Variant {
+                    ty: option_id,
+                    variant: VariantId::new(0),
+                    fields: vec![],
+                },
+            }],
+            Terminator::Goto { target },
+        )?;
         let some_block = self.push_synthetic_block(
             block,
             vec![
@@ -727,19 +694,19 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
                         right: Operand::Constant(Constant::I32(1)),
                     },
                 },
-                Statement::Assign {
-                    destination: base,
-                    value: Rvalue::Struct {
-                        ty: range_id,
-                        fields: vec![Operand::Copy(advanced), Operand::Copy(end)],
+                Statement::Store {
+                    destination: OmPlace {
+                        base: iterator_local,
+                        path: start_path,
                     },
+                    value: Rvalue::Use(Operand::Copy(advanced)),
                 },
                 Statement::Assign {
                     destination,
                     value: Rvalue::Variant {
                         ty: option_id,
                         variant: VariantId::new(1),
-                        fields: vec![Operand::Move(advanced)],
+                        fields: vec![Operand::Move(start)],
                     },
                 },
             ],
@@ -959,10 +926,41 @@ impl<'a, 'tcx> BodyLowerer<'a, 'tcx> {
         };
         match core_try_enum_name(self.tcx, definition.did()) {
             Some("Option") => Ok(SyntheticCall::OptionFromResidual { option: self_ty }),
-            Some("Result") => Ok(SyntheticCall::ResultFromResidual {
-                result: self_ty,
-                residual,
-            }),
+            Some("Result") => {
+                let ty::Adt(_, result_arguments) = self_ty.kind() else {
+                    unreachable!("Result was classified as an ADT above");
+                };
+                let ty::Adt(residual_definition, residual_arguments) = residual.kind() else {
+                    return Err(self.block_error(
+                        block,
+                        format!("unexpected Result residual type `{residual}`"),
+                    ));
+                };
+                if !core_try_enum_name(self.tcx, residual_definition.did())
+                    .is_some_and(|name| name == "Result")
+                {
+                    return Err(self.block_error(
+                        block,
+                        format!("unexpected Result residual type `{residual}`"),
+                    ));
+                }
+
+                let target_error = result_arguments.type_at(1);
+                let residual_error = residual_arguments.type_at(1);
+                if target_error != residual_error {
+                    return Err(self.block_error(
+                        block,
+                        format!(
+                            "the `?` operator requires converting Result error `{residual_error}` into `{target_error}`; error conversion is not supported yet"
+                        ),
+                    ));
+                }
+
+                Ok(SyntheticCall::ResultFromResidual {
+                    result: self_ty,
+                    residual,
+                })
+            }
             _ => Err(self.unsupported_try(block, self_ty)),
         }
     }
@@ -1160,30 +1158,33 @@ fn checked_binary(value: &MirRvalue<'_>) -> Option<CheckedBinaryOp> {
     }
 }
 
-fn lower_unary(op: MirUnOp) -> Option<UnaryOp> {
+fn lower_unary(op: MirUnOp, operand: Ty<'_>) -> Option<UnaryOp> {
     match op {
-        MirUnOp::Neg => Some(UnaryOp::Neg),
-        MirUnOp::Not => Some(UnaryOp::Not),
+        MirUnOp::Neg if matches!(operand.kind(), ty::Int(IntTy::I32)) => Some(UnaryOp::Neg),
+        MirUnOp::Not if matches!(operand.kind(), ty::Bool) => Some(UnaryOp::Not),
+        MirUnOp::Not if matches!(operand.kind(), ty::Int(IntTy::I32)) => Some(UnaryOp::BitNot),
         _ => None,
     }
 }
 
 fn lower_binary(op: MirBinOp, left: Ty<'_>, right: Ty<'_>) -> Option<BinaryOp> {
+    let both_bool = matches!(left.kind(), ty::Bool) && matches!(right.kind(), ty::Bool);
+    let both_i32 = matches!(left.kind(), ty::Int(IntTy::I32))
+        && matches!(right.kind(), ty::Int(IntTy::I32));
+
     match op {
-        MirBinOp::BitAnd if matches!(left.kind(), ty::Bool) && matches!(right.kind(), ty::Bool) => {
-            Some(BinaryOp::And)
-        }
-        MirBinOp::Add => Some(BinaryOp::Add),
-        MirBinOp::Sub => Some(BinaryOp::Sub),
-        MirBinOp::Mul => Some(BinaryOp::Mul),
-        MirBinOp::Div => Some(BinaryOp::Div),
-        MirBinOp::Rem => Some(BinaryOp::Rem),
-        MirBinOp::Eq => Some(BinaryOp::Eq),
-        MirBinOp::Ne => Some(BinaryOp::Ne),
-        MirBinOp::Lt => Some(BinaryOp::Lt),
-        MirBinOp::Le => Some(BinaryOp::Le),
-        MirBinOp::Gt => Some(BinaryOp::Gt),
-        MirBinOp::Ge => Some(BinaryOp::Ge),
+        MirBinOp::BitAnd if both_bool => Some(BinaryOp::And),
+        MirBinOp::Add if both_i32 => Some(BinaryOp::Add),
+        MirBinOp::Sub if both_i32 => Some(BinaryOp::Sub),
+        MirBinOp::Mul if both_i32 => Some(BinaryOp::Mul),
+        MirBinOp::Div if both_i32 => Some(BinaryOp::Div),
+        MirBinOp::Rem if both_i32 => Some(BinaryOp::Rem),
+        MirBinOp::Eq if both_bool || both_i32 => Some(BinaryOp::Eq),
+        MirBinOp::Ne if both_bool || both_i32 => Some(BinaryOp::Ne),
+        MirBinOp::Lt if both_i32 || both_bool => Some(BinaryOp::Lt),
+        MirBinOp::Le if both_i32 || both_bool => Some(BinaryOp::Le),
+        MirBinOp::Gt if both_i32 || both_bool => Some(BinaryOp::Gt),
+        MirBinOp::Ge if both_i32 || both_bool => Some(BinaryOp::Ge),
         _ => None,
     }
 }

@@ -64,13 +64,56 @@ pub enum LocalKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefKind {
+    Shared,
+    Mutable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefTarget {
+    Unit,
+    Bool,
+    I32,
+    Struct(TypeId),
+    Enum(TypeId),
+}
+
+impl RefTarget {
+    pub fn as_type(self) -> OmType {
+        match self {
+            Self::Unit => OmType::Unit,
+            Self::Bool => OmType::Bool,
+            Self::I32 => OmType::I32,
+            Self::Struct(id) => OmType::Struct(id),
+            Self::Enum(id) => OmType::Enum(id),
+        }
+    }
+}
+
+impl OmType {
+    pub fn as_ref_target(self) -> Option<RefTarget> {
+        match self {
+            Self::Unit => Some(RefTarget::Unit),
+            Self::Bool => Some(RefTarget::Bool),
+            Self::I32 => Some(RefTarget::I32),
+            Self::Struct(id) => Some(RefTarget::Struct(id)),
+            Self::Enum(id) => Some(RefTarget::Enum(id)),
+            Self::Ref { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OmType {
     Unit,
     Bool,
     I32,
     Struct(TypeId),
     Enum(TypeId),
-    SharedRef(TypeId),
+    Ref {
+        kind: RefKind,
+        target: RefTarget,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +127,10 @@ pub struct OmBlock {
 pub enum Statement {
     Assign {
         destination: LocalId,
+        value: Rvalue,
+    },
+    Store {
+        destination: Place,
         value: Rvalue,
     },
     CheckedBinary {
@@ -119,9 +166,25 @@ pub enum Rvalue {
     Discriminant {
         source: Operand,
     },
-    SharedBorrow {
-        source: Operand,
+    Borrow {
+        kind: RefKind,
+        source: Place,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub base: LocalId,
+    pub path: Vec<ProjectElem>,
+}
+
+impl Place {
+    pub fn local(base: LocalId) -> Self {
+        Self {
+            base,
+            path: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,6 +217,7 @@ pub enum Constant {
 pub enum UnaryOp {
     Neg,
     Not,
+    BitNot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,7 +256,7 @@ pub enum Terminator {
     Call {
         callee: FunctionId,
         arguments: Vec<Operand>,
-        destination: LocalId,
+        destination: Place,
         target: BlockId,
         unwind: UnwindAction,
     },

@@ -51,7 +51,7 @@ fn lowers_structs_and_shared_references_to_packed_tables() {
             locals: vec![
                 om_local(0, OmType::Unit, LocalKind::Return),
                 om_local(1, OmType::Struct(point), LocalKind::Temporary),
-                om_local(2, OmType::SharedRef(point), LocalKind::Temporary),
+                om_local(2, OmType::Ref { kind: omlua_ir::RefKind::Shared, target: omlua_ir::RefTarget::Struct(point) }, LocalKind::Temporary),
                 om_local(3, OmType::I32, LocalKind::Temporary),
             ],
             blocks: vec![OmBlock {
@@ -69,9 +69,7 @@ fn lowers_structs_and_shared_references_to_packed_tables() {
                     },
                     Statement::Assign {
                         destination: LocalId::new(2),
-                        value: Rvalue::SharedBorrow {
-                            source: Operand::Copy(LocalId::new(1)),
-                        },
+                        value: Rvalue::Borrow { kind: omlua_ir::RefKind::Shared, source: omlua_ir::Place::local(LocalId::new(1)) },
                     },
                     Statement::Assign {
                         destination: LocalId::new(3),
@@ -92,6 +90,9 @@ fn lowers_structs_and_shared_references_to_packed_tables() {
         lir.functions[0].locals[0].kind,
         LirValueKind::Table(vec![LirValueKind::Integer, LirValueKind::Integer])
     );
+    assert!(lir.functions[0].locals[0].addressable);
+    assert_eq!(lir.helpers, vec![RuntimeHelper::RefGet]);
+    let point_shape = LirValueKind::Table(vec![LirValueKind::Integer, LirValueKind::Integer]);
     assert_eq!(
         lir.functions[0].blocks[0].statements,
         vec![
@@ -106,12 +107,20 @@ fn lowers_structs_and_shared_references_to_packed_tables() {
             },
             LirStatement::Assign {
                 destination: LirLocalId::new(2),
-                value: LirExpression::Value(LirValue::Local(LirLocalId::new(1))),
+                value: LirExpression::Reference {
+                    kind: omlua_lua_ir::LirRefKind::Shared,
+                    place: Box::new(omlua_lua_ir::LirPlace::Local(LirLocalId::new(1))),
+                },
             },
             LirStatement::Assign {
                 destination: LirLocalId::new(3),
                 value: LirExpression::TableGet {
-                    table: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(2)))),
+                    table: Box::new(LirExpression::DerefGet {
+                        reference: Box::new(LirExpression::Value(LirValue::Local(
+                            LirLocalId::new(2),
+                        ))),
+                        result: point_shape,
+                    }),
                     index: 2,
                     result: LirValueKind::Integer,
                 },
@@ -363,7 +372,7 @@ fn cleanup_unwind_program() -> OmProgram {
                 terminator: Terminator::Call {
                     callee: FunctionId::new(1),
                     arguments: Vec::new(),
-                    destination: LocalId::new(0),
+                    destination: omlua_ir::Place::local(LocalId::new(0)),
                     target: BlockId::new(0),
                     unwind: UnwindAction::Cleanup(BlockId::new(1)),
                 },
@@ -509,6 +518,7 @@ fn lir_local(index: u32, kind: LirValueKind, parameter: bool) -> LirLocal {
         id: LirLocalId::new(index),
         kind,
         parameter,
+        addressable: false,
     }
 }
 
@@ -580,7 +590,7 @@ fn lowers_enums_and_match_data_to_packed_tables() {
                 om_local(1, OmType::Enum(command), LocalKind::Temporary),
                 om_local(2, OmType::I32, LocalKind::Discriminant),
                 om_local(3, OmType::I32, LocalKind::Temporary),
-                om_local(4, OmType::SharedRef(vec2), LocalKind::Temporary),
+                om_local(4, OmType::Ref { kind: omlua_ir::RefKind::Shared, target: omlua_ir::RefTarget::Struct(vec2) }, LocalKind::Temporary),
                 om_local(5, OmType::I32, LocalKind::Temporary),
             ],
             blocks: vec![OmBlock {
@@ -616,14 +626,14 @@ fn lowers_enums_and_match_data_to_packed_tables() {
                     },
                     Statement::Assign {
                         destination: LocalId::new(4),
-                        value: Rvalue::SharedBorrow {
-                            source: Operand::Project {
+                        value: Rvalue::Borrow {
+                            kind: omlua_ir::RefKind::Shared,
+                            source: omlua_ir::Place {
                                 base: LocalId::new(1),
                                 path: vec![
                                     ProjectElem::Downcast(VariantId::new(2)),
                                     ProjectElem::Field(FieldId::new(0)),
                                 ],
-                                moved: false,
                             },
                         },
                     },
@@ -643,6 +653,7 @@ fn lowers_enums_and_match_data_to_packed_tables() {
 
     let lir = lower_program(&program, &LuaBackendProfile::lua54()).unwrap();
     let function = &lir.functions[0];
+    assert_eq!(lir.helpers, vec![RuntimeHelper::RefGet]);
     let shapes = vec![
         vec![],
         vec![LirValueKind::Integer, LirValueKind::Integer],
@@ -683,19 +694,33 @@ fn lowers_enums_and_match_data_to_packed_tables() {
             },
             LirStatement::Assign {
                 destination: LirLocalId::new(4),
-                value: LirExpression::EnumField {
-                    value: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(1)))),
-                    variant: 2,
-                    field: 0,
-                    result: LirValueKind::Table(
-                        vec![LirValueKind::Integer, LirValueKind::Integer,]
-                    ),
+                value: LirExpression::Reference {
+                    kind: omlua_lua_ir::LirRefKind::Shared,
+                    place: Box::new(omlua_lua_ir::LirPlace::EnumField {
+                        value: Box::new(LirExpression::Value(LirValue::Local(
+                            LirLocalId::new(1),
+                        ))),
+                        variant: 2,
+                        field: 0,
+                        result: LirValueKind::Table(vec![
+                            LirValueKind::Integer,
+                            LirValueKind::Integer,
+                        ]),
+                    }),
                 },
             },
             LirStatement::Assign {
                 destination: LirLocalId::new(5),
                 value: LirExpression::TableGet {
-                    table: Box::new(LirExpression::Value(LirValue::Local(LirLocalId::new(4)))),
+                    table: Box::new(LirExpression::DerefGet {
+                        reference: Box::new(LirExpression::Value(LirValue::Local(
+                            LirLocalId::new(4),
+                        ))),
+                        result: LirValueKind::Table(vec![
+                            LirValueKind::Integer,
+                            LirValueKind::Integer,
+                        ]),
+                    }),
                     index: 1,
                     result: LirValueKind::Integer,
                 },
@@ -1229,7 +1254,7 @@ fn rejects_malformed_enum_programs() {
             .unwrap_err()
             .to_string(),
         concat!(
-            "error[OMLUA0002]: projection ends with a downcast without a field read\n",
+            "error[OMLUA0002]: projection ends with a downcast without a field access\n",
             "  in function `main`",
         )
     );
@@ -1384,4 +1409,268 @@ fn enum_base() -> OmProgram {
             }],
         }],
     }
+}
+
+#[test]
+fn lowers_mutable_places_and_references_to_reference_cells() {
+    let point = TypeId::new(0);
+    let point_type = OmType::Struct(point);
+    let mut_point = OmType::Ref {
+        kind: omlua_ir::RefKind::Mutable,
+        target: omlua_ir::RefTarget::Struct(point),
+    };
+    let mut_i32 = OmType::Ref {
+        kind: omlua_ir::RefKind::Mutable,
+        target: omlua_ir::RefTarget::I32,
+    };
+    let program = OmProgram {
+        entry: FunctionId::new(0),
+        structs: vec![OmStruct {
+            id: point,
+            name: "Point".to_owned(),
+            fields: vec![
+                OmField {
+                    id: FieldId::new(0),
+                    name: "x".to_owned(),
+                    ty: OmType::I32,
+                },
+                OmField {
+                    id: FieldId::new(1),
+                    name: "y".to_owned(),
+                    ty: OmType::I32,
+                },
+            ],
+        }],
+        enums: vec![],
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "main".to_owned(),
+            return_type: OmType::Unit,
+            parameters: vec![],
+            locals: vec![
+                om_local(0, OmType::Unit, LocalKind::Return),
+                om_local(1, point_type, LocalKind::Temporary),
+                om_local(2, mut_point, LocalKind::Temporary),
+                om_local(3, mut_i32, LocalKind::Temporary),
+                om_local(4, OmType::I32, LocalKind::Temporary),
+            ],
+            blocks: vec![OmBlock {
+                id: BlockId::new(0),
+                statements: vec![
+                    Statement::Assign {
+                        destination: LocalId::new(1),
+                        value: Rvalue::Struct {
+                            ty: point,
+                            fields: vec![
+                                Operand::Constant(Constant::I32(1)),
+                                Operand::Constant(Constant::I32(2)),
+                            ],
+                        },
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(2),
+                        value: Rvalue::Borrow {
+                            kind: omlua_ir::RefKind::Mutable,
+                            source: omlua_ir::Place::local(LocalId::new(1)),
+                        },
+                    },
+                    Statement::Store {
+                        destination: omlua_ir::Place {
+                            base: LocalId::new(2),
+                            path: vec![
+                                ProjectElem::Deref,
+                                ProjectElem::Field(FieldId::new(0)),
+                            ],
+                        },
+                        value: Rvalue::Use(Operand::Constant(Constant::I32(7))),
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(3),
+                        value: Rvalue::Borrow {
+                            kind: omlua_ir::RefKind::Mutable,
+                            source: omlua_ir::Place {
+                                base: LocalId::new(2),
+                                path: vec![
+                                    ProjectElem::Deref,
+                                    ProjectElem::Field(FieldId::new(1)),
+                                ],
+                            },
+                        },
+                    },
+                    Statement::Store {
+                        destination: omlua_ir::Place {
+                            base: LocalId::new(3),
+                            path: vec![ProjectElem::Deref],
+                        },
+                        value: Rvalue::Use(Operand::Constant(Constant::I32(8))),
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(4),
+                        value: Rvalue::Use(Operand::Project {
+                            base: LocalId::new(2),
+                            path: vec![
+                                ProjectElem::Deref,
+                                ProjectElem::Field(FieldId::new(0)),
+                            ],
+                            moved: false,
+                        }),
+                    },
+                ],
+                terminator: Terminator::Return,
+            }],
+        }],
+    };
+
+    let lir = lower_program(&program, &LuaBackendProfile::lua54()).unwrap();
+    assert_eq!(lir.helpers, vec![RuntimeHelper::RefGet, RuntimeHelper::RefSet]);
+    let function = &lir.functions[0];
+    let point_local = function
+        .locals
+        .iter()
+        .find(|local| local.id == LirLocalId::new(1))
+        .unwrap();
+    assert!(point_local.addressable);
+    assert!(matches!(
+        &function.blocks[0].statements[1],
+        LirStatement::Assign {
+            value: LirExpression::Reference {
+                kind: omlua_lua_ir::LirRefKind::Mutable,
+                place,
+            },
+            ..
+        } if matches!(place.as_ref(), omlua_lua_ir::LirPlace::Local(id) if *id == LirLocalId::new(1))
+    ));
+    assert!(matches!(
+        &function.blocks[0].statements[2],
+        LirStatement::Store {
+            destination: omlua_lua_ir::LirPlace::TableField { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        &function.blocks[0].statements[4],
+        LirStatement::Store {
+            destination: omlua_lua_ir::LirPlace::Deref { .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn copies_aggregate_values_instead_of_aliasing_lua_tables() {
+    let point = TypeId::new(0);
+    let program = OmProgram {
+        entry: FunctionId::new(0),
+        structs: vec![OmStruct {
+            id: point,
+            name: "Point".to_owned(),
+            fields: vec![OmField {
+                id: FieldId::new(0),
+                name: "x".to_owned(),
+                ty: OmType::I32,
+            }],
+        }],
+        enums: vec![],
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "main".to_owned(),
+            return_type: OmType::Unit,
+            parameters: vec![],
+            locals: vec![
+                om_local(0, OmType::Unit, LocalKind::Return),
+                om_local(1, OmType::Struct(point), LocalKind::Temporary),
+                om_local(2, OmType::Struct(point), LocalKind::Temporary),
+            ],
+            blocks: vec![OmBlock {
+                id: BlockId::new(0),
+                statements: vec![
+                    Statement::Assign {
+                        destination: LocalId::new(1),
+                        value: Rvalue::Struct {
+                            ty: point,
+                            fields: vec![Operand::Constant(Constant::I32(3))],
+                        },
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(2),
+                        value: Rvalue::Use(Operand::Copy(LocalId::new(1))),
+                    },
+                    Statement::Store {
+                        destination: omlua_ir::Place {
+                            base: LocalId::new(2),
+                            path: vec![ProjectElem::Field(FieldId::new(0))],
+                        },
+                        value: Rvalue::Use(Operand::Constant(Constant::I32(99))),
+                    },
+                ],
+                terminator: Terminator::Return,
+            }],
+        }],
+    };
+
+    let lir = lower_program(&program, &LuaBackendProfile::lua54()).unwrap();
+    assert_eq!(lir.helpers, vec![RuntimeHelper::DeepCopy]);
+    assert!(matches!(
+        &lir.functions[0].blocks[0].statements[1],
+        LirStatement::Assign {
+            value: LirExpression::RuntimeCall {
+                helper: RuntimeHelper::DeepCopy,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn rejects_writes_through_shared_references() {
+    let shared_i32 = OmType::Ref {
+        kind: omlua_ir::RefKind::Shared,
+        target: omlua_ir::RefTarget::I32,
+    };
+    let program = OmProgram {
+        entry: FunctionId::new(0),
+        structs: vec![],
+        enums: vec![],
+        functions: vec![OmFunction {
+            id: FunctionId::new(0),
+            name: "main".to_owned(),
+            return_type: OmType::Unit,
+            parameters: vec![],
+            locals: vec![
+                om_local(0, OmType::Unit, LocalKind::Return),
+                om_local(1, OmType::I32, LocalKind::Temporary),
+                om_local(2, shared_i32, LocalKind::Temporary),
+            ],
+            blocks: vec![OmBlock {
+                id: BlockId::new(0),
+                statements: vec![
+                    Statement::Assign {
+                        destination: LocalId::new(1),
+                        value: Rvalue::Use(Operand::Constant(Constant::I32(1))),
+                    },
+                    Statement::Assign {
+                        destination: LocalId::new(2),
+                        value: Rvalue::Borrow {
+                            kind: omlua_ir::RefKind::Shared,
+                            source: omlua_ir::Place::local(LocalId::new(1)),
+                        },
+                    },
+                    Statement::Store {
+                        destination: omlua_ir::Place {
+                            base: LocalId::new(2),
+                            path: vec![ProjectElem::Deref],
+                        },
+                        value: Rvalue::Use(Operand::Constant(Constant::I32(2))),
+                    },
+                ],
+                terminator: Terminator::Return,
+            }],
+        }],
+    };
+
+    let error = lower_program(&program, &LuaBackendProfile::lua54()).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("write through a shared reference is not supported"));
 }

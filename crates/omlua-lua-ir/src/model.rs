@@ -19,6 +19,9 @@ pub struct BackendRequirements {
 pub enum RuntimeHelper {
     I32DivTrunc,
     I32Rem,
+    DeepCopy,
+    RefGet,
+    RefSet,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +39,13 @@ pub struct LirLocal {
     pub id: LirLocalId,
     pub kind: LirValueKind,
     pub parameter: bool,
+    pub addressable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LirRefKind {
+    Shared,
+    Mutable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +54,10 @@ pub enum LirValueKind {
     Integer,
     Table(Vec<LirValueKind>),
     Enum(Vec<Vec<LirValueKind>>),
+    Reference {
+        kind: LirRefKind,
+        pointee: Box<LirValueKind>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +72,30 @@ pub enum LirStatement {
     Assign {
         destination: LirLocalId,
         value: LirExpression,
+    },
+    Store {
+        destination: LirPlace,
+        value: LirExpression,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LirPlace {
+    Local(LirLocalId),
+    TableField {
+        table: Box<LirExpression>,
+        index: u32,
+        result: LirValueKind,
+    },
+    EnumField {
+        value: Box<LirExpression>,
+        variant: u32,
+        field: u32,
+        result: LirValueKind,
+    },
+    Deref {
+        reference: Box<LirExpression>,
+        result: LirValueKind,
     },
 }
 
@@ -99,6 +137,14 @@ pub enum LirExpression {
         field: u32,
         result: LirValueKind,
     },
+    Reference {
+        kind: LirRefKind,
+        place: Box<LirPlace>,
+    },
+    DerefGet {
+        reference: Box<LirExpression>,
+        result: LirValueKind,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +158,7 @@ pub enum LirValue {
 pub enum LirUnaryOp {
     Neg,
     Not,
+    BitNot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +189,7 @@ pub enum LirTerminator {
     Call {
         callee: LirFunctionId,
         arguments: Vec<LirExpression>,
-        destination: Option<LirLocalId>,
+        destination: Option<LirPlace>,
         target: LirBlockId,
     },
     Branch {

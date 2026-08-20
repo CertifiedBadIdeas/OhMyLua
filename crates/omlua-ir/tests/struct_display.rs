@@ -44,7 +44,7 @@ fn formats_structs_and_shared_references_deterministically() {
                 },
                 OmLocal {
                     id: LocalId::new(2),
-                    ty: OmType::SharedRef(point),
+                    ty: OmType::Ref { kind: omlua_ir::RefKind::Shared, target: omlua_ir::RefTarget::Struct(point) },
                     kind: LocalKind::Temporary,
                 },
                 OmLocal {
@@ -68,9 +68,7 @@ fn formats_structs_and_shared_references_deterministically() {
                     },
                     Statement::Assign {
                         destination: LocalId::new(2),
-                        value: Rvalue::SharedBorrow {
-                            source: Operand::Copy(LocalId::new(1)),
-                        },
+                        value: Rvalue::Borrow { kind: omlua_ir::RefKind::Shared, source: omlua_ir::Place::local(LocalId::new(1)) },
                     },
                     Statement::Assign {
                         destination: LocalId::new(3),
